@@ -1,0 +1,9 @@
+import { rmSync } from "node:fs";
+
+for (const target of process.argv.slice(2)) {
+  if (!target || target === "." || target === "/") {
+    continue;
+  }
+
+  rmSync(target, { recursive: true, force: true });
+}

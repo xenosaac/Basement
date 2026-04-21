@@ -1,0 +1,127 @@
+@import "tailwindcss";
+
+@theme {
+  /* Base colors */
+  --color-background: #000000;
+  --color-foreground: #ffffff;
+  --color-muted: rgba(255,255,255,0.5);
+  --color-muted-foreground: rgba(255,255,255,0.35);
+
+  /* Accent (yellow brand) — 3 variants */
+  --color-accent: #FFDD00;
+  --color-accent-dim: rgba(255,221,0,0.12);
+  --color-accent-glow: rgba(255,221,0,0.06);
+
+  /* Glass surface — 3 variants */
+  --color-glass: rgba(255,255,255,0.03);
+  --color-glass-border: rgba(255,255,255,0.08);
+  --color-glass-hover: rgba(255,255,255,0.06);
+
+  /* Yes (green) — 3 variants */
+  --color-yes: #22c55e;
+  --color-yes-dim: rgba(34,197,94,0.10);
+  --color-yes-border: rgba(34,197,94,0.20);
+
+  /* No (red) — 3 variants */
+  --color-no: #ef4444;
+  --color-no-dim: rgba(239,68,68,0.10);
+  --color-no-border: rgba(239,68,68,0.20);
+
+  /* Font families */
+  --font-sans: Inter, system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+
+  /* Custom font sizes — xs through 4xl override default Tailwind sizes.
+     IMPORTANT: our text-base = 14px (not default 16px) is design baseline. */
+  --text-xs: 11px;
+  --text-xs--line-height: 16px;
+  --text-xs--letter-spacing: 0.5px;
+  --text-sm: 13px;
+  --text-sm--line-height: 20px;
+  --text-base: 14px;
+  --text-base--line-height: 21px;
+  --text-lg: 17px;
+  --text-lg--line-height: 26px;
+  --text-xl: 20px;
+  --text-xl--line-height: 28px;
+  --text-2xl: 24px;
+  --text-2xl--line-height: 32px;
+  --text-3xl: 32px;
+  --text-3xl--line-height: 38px;
+  --text-4xl: 42px;
+  --text-4xl--line-height: 42px;
+  --text-hero: 80px;
+  --text-hero--line-height: 80px;
+  --text-giant: 120px;
+  --text-giant--line-height: 120px;
+
+  /* Border radius — custom pill */
+  --radius-pill: 9999px;
+
+  /* Backdrop blur — glass variant */
+  --blur-glass: 20px;
+
+  /* Shadows — glow variants */
+  --shadow-glow: 0 0 40px rgba(255,221,0,0.15), 0 0 80px rgba(255,221,0,0.05);
+  --shadow-glow-sm: 0 0 20px rgba(255,221,0,0.10);
+
+  /* Animation */
+  --animate-pulse-glow: pulse-glow 3s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 20px rgba(255,221,0,0.08); }
+  50% { box-shadow: 0 0 40px rgba(255,221,0,0.20); }
+}
+
+/* === Everything BELOW this line is custom CSS, preserved verbatim from old globals.css === */
+
+body {
+  font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+  background: #000000;
+  color: #ffffff;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Frosted glass utility */
+.glass {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+.glass-hover:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+}
+
+/* Selection */
+::selection {
+  background: rgba(255, 221, 0, 0.3);
+  color: #ffffff;
+}
+
+/* Hide number input arrows */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+}

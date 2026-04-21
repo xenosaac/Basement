@@ -1,0 +1,82 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/node_modules.nosync
+/.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# testing
+/coverage
+
+# next.js
+/.next
+/.next-dev
+/.next-prod
+/.next.nosync
+/.next-dev.nosync
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+**/.DS_Store
+*.pem
+
+# debug + all logs (never commit — may leak keys, endpoints, or business state)
+*.log
+*.log.*
+**/*.log
+logs/
+**/logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# local env files
+.env
+.env*.local
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+/src/generated/prisma
+.gstack/
+
+# local scratch
+/data/
+
+# root logo duplicate (canonical copy is in public/)
+/logo.png
+/logo.PNG
+
+# iCloud nosync symlinks
+*.nosync
+
+# notes / docs — only README is tracked publicly.
+# worklog.md, progress.json, and docs/ hold internal research + session state
+# (Aptos integration red-lines, orchestration plans, wallet strategy) — not for public repo.
+*.md
+!README.md
+/progress.json
+/docs/
+
+# local tooling
+.claude/
+.agents/
+.mcp.json
+.aidesigner/
+
+# session workspace (tar backups; regenerate per session, never commit)
+.session-a-wip/
+
+# local tooling (like .claude/)
+.gstack/

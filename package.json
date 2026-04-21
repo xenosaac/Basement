@@ -1,0 +1,42 @@
+{
+  "name": "basement",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "NEXT_DIST_DIR=.next-dev next dev",
+    "build": "node scripts/clean-dist.mjs .next-prod.nosync && NEXT_DIST_DIR=.next-prod.nosync next build && node scripts/normalize-next-dist.mjs .next-prod.nosync",
+    "start": "NEXT_DIST_DIR=.next-prod.nosync next start",
+    "lint": "next lint",
+    "db:push": "drizzle-kit push",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:setup": "drizzle-kit push && tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@aptos-labs/ts-sdk": "^5.1.1",
+    "@aptos-labs/wallet-adapter-core": "^8.5.1",
+    "@aptos-labs/wallet-adapter-react": "^8.3.3",
+    "@tanstack/react-query": "^5.96.2",
+    "dotenv": "^17.4.1",
+    "drizzle-orm": "^0.45.2",
+    "jose": "^6.2.2",
+    "next": "^15.5.15",
+    "pg": "^8.20.0",
+    "proxy-compare": "^3.0.1",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.3",
+    "@types/node": "^20",
+    "@types/pg": "^8.20.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "drizzle-kit": "^0.31.10",
+    "eslint": "^8",
+    "eslint-config-next": "^15.5.15",
+    "postcss": "^8",
+    "tailwindcss": "^4.2.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5"
+  }
+}
