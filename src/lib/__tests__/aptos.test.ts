@@ -264,11 +264,11 @@ describe("admin builders — payload shape (no private key reads)", () => {
     expect(txn.data.functionArguments).toEqual(["42", 1]);
   });
 
-  it("buildSpawnRecurring3minTxn encodes feedId as byte array", async () => {
+  it("buildSpawnRecurring3minTxn encodes groupId as UTF-8 bytes and feedId as bytes", async () => {
     setEnvHappy();
     const mod = await import("../aptos");
     const txn = mod.buildSpawnRecurring3minTxn(
-      7n,
+      "btc-3m",
       "0xdeadbeef",
       1000n,
       5n,
@@ -277,8 +277,20 @@ describe("admin builders — payload shape (no private key reads)", () => {
     expect(txn.data.function).toBe(
       "0xabc1::market_factory::spawn_recurring_3min",
     );
-    expect(Array.isArray(txn.data.functionArguments[1])).toBe(true);
+    // Arg 0 is groupId as UTF-8 bytes of "btc-3m".
+    expect(txn.data.functionArguments[0]).toEqual(
+      Array.from(new TextEncoder().encode("btc-3m")),
+    );
+    // Arg 1 is feedId as hex-decoded bytes.
     expect(txn.data.functionArguments[1]).toEqual([0xde, 0xad, 0xbe, 0xef]);
+  });
+
+  it("buildAdminPauseTxn carries caseId", async () => {
+    setEnvHappy();
+    const mod = await import("../aptos");
+    const txn = mod.buildAdminPauseTxn(99n);
+    expect(txn.data.function).toBe("0xabc1::case_vault::admin_pause");
+    expect(txn.data.functionArguments).toEqual(["99"]);
   });
 
   it("buildCreateMarketTxn carries all market params", async () => {
@@ -300,8 +312,9 @@ describe("admin builders — payload shape (no private key reads)", () => {
     expect(txn.data.functionArguments.length).toBe(10);
   });
 
-  it("submitAdminTxn throws the Session E stub error", async () => {
+  it("submitAdminTxn throws when APTOS_ADMIN_PRIVATE_KEY is unset", async () => {
     setEnvHappy();
+    delete process.env.APTOS_ADMIN_PRIVATE_KEY;
     const mod = await import("../aptos");
     await expect(
       mod.submitAdminTxn({
@@ -311,7 +324,7 @@ describe("admin builders — payload shape (no private key reads)", () => {
           functionArguments: [],
         },
       }),
-    ).rejects.toThrow(/Session E/);
+    ).rejects.toThrow(/APTOS_ADMIN_PRIVATE_KEY/);
   });
 });
 

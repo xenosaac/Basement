@@ -3,6 +3,10 @@
     {
       "path": "/api/cron/resolve",
       "schedule": "*/2 * * * *"
+    },
+    {
+      "path": "/api/cron/spawn-recurring",
+      "schedule": "*/2 * * * *"
     }
   ]
 }

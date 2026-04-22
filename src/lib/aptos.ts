@@ -9,9 +9,9 @@
  *  - User tx builders (buy / sell / claim) + simulate helpers (T4-07..T4-09)
  *  - Sponsored-gas builder (inner-entry allowlist hardcoded) + Pyth Hermes
  *    VAA fetch + resolve builder (T4-10)
- *  - Admin tx builder skeletons — no private key reads here; `submitAdminTxn`
- *    is a stub that throws until Session E wires `APTOS_ADMIN_PRIVATE_KEY`
- *    (T4-11)
+ *  - Admin tx builders + `submitAdminTxn` (Session D un-stub): private key
+ *    loaded call-time from `APTOS_ADMIN_PRIVATE_KEY`, never at module import,
+ *    never logged, never returned in responses.
  *
  * Red-lines honored
  *  - R-4: chainId is fetched at runtime via `aptos.getLedgerInfo()`, never
@@ -31,6 +31,7 @@ import {
   Aptos,
   AptosConfig,
   Network,
+  type InputEntryFunctionData,
   type InputViewFunctionData,
   type MoveResource,
 } from "@aptos-labs/ts-sdk";
@@ -786,20 +787,37 @@ export function buildAdminResolveTxn(
   };
 }
 
+/** `admin_pause(admin, case_id)` — one-way OPEN -> CLOSED gate. */
+export function buildAdminPauseTxn(caseId: CaseId): InputTransactionData {
+  return {
+    data: {
+      function: entryFn("case_vault", "admin_pause"),
+      typeArguments: [],
+      functionArguments: [caseId.toString()],
+    },
+  };
+}
+
+/**
+ * Build `market_factory::spawn_recurring_3min`. Move signature takes
+ * `group_id: vector<u8>` so we UTF-8 encode the logical group name
+ * (e.g. "btc-3m", "eth-3m"). `feedId` is hex-encoded Pyth bytes32.
+ */
 export function buildSpawnRecurring3minTxn(
-  groupId: bigint,
+  groupId: string,
   feedId: string,
   currentPrice: bigint,
   tickSize: bigint,
   poolDepth: bigint,
 ): InputTransactionData {
+  const groupBytes = Array.from(new TextEncoder().encode(groupId));
   const feedBytes = Array.from(fromHex(feedId));
   return {
     data: {
       function: entryFn("market_factory", "spawn_recurring_3min"),
       typeArguments: [],
       functionArguments: [
-        groupId.toString(),
+        groupBytes,
         feedBytes,
         currentPrice.toString(),
         tickSize.toString(),
@@ -810,18 +828,47 @@ export function buildSpawnRecurring3minTxn(
 }
 
 /**
- * STUB: Session E wires APTOS_ADMIN_PRIVATE_KEY.
- * TODO: Session E wires APTOS_ADMIN_PRIVATE_KEY — load via
- *   `PrivateKey.formatPrivateKey(hex, PrivateKeyVariants.Ed25519)` →
- *   `Ed25519PrivateKey` → `Account.fromPrivateKey(...)`, then
- *   `aptos.signAndSubmitTransaction({ signer, transaction })`.
- * In Session A we deliberately throw to prevent accidental use and to keep
- * this file free of any private-key env reads (audit grep rule).
+ * INVARIANT: admin-signing path; never moves user VirtualUSD; only mutates
+ * market state via on-chain entry functions (spawn_recurring_3min,
+ * admin_resolve, admin_pause). Private key loaded call-time from
+ * APTOS_ADMIN_PRIVATE_KEY — never at module import, never logged, never
+ * returned in responses. Rotation: generate new Ed25519 key via `aptos init`,
+ * overwrite `.env` APTOS_ADMIN_PRIVATE_KEY, redeploy. Session D un-stubbed.
  */
 export async function submitAdminTxn(
-  _payload: InputTransactionData,
+  payload: InputTransactionData,
 ): Promise<{ txnHash: string; success: boolean }> {
-  throw new Error(
-    "[aptos.ts] admin submission handled in Session E — submitAdminTxn is a Session A stub.",
-  );
+  const rawKey = process.env.APTOS_ADMIN_PRIVATE_KEY ?? "";
+  if (rawKey.trim() === "" || rawKey.startsWith("0x_")) {
+    throw new Error(
+      "[aptos.ts] APTOS_ADMIN_PRIVATE_KEY is not configured. " +
+        "Add the admin Ed25519 hex key to .env (gitignored) before invoking admin-signing paths.",
+    );
+  }
+
+  const {
+    Account,
+    Ed25519PrivateKey,
+    PrivateKey,
+    PrivateKeyVariants,
+  } = await import("@aptos-labs/ts-sdk");
+
+  const hex = PrivateKey.formatPrivateKey(rawKey, PrivateKeyVariants.Ed25519);
+  const signer = Account.fromPrivateKey({
+    privateKey: new Ed25519PrivateKey(hex),
+  });
+
+  const transaction = await aptos.transaction.build.simple({
+    sender: signer.accountAddress,
+    data: payload.data as InputEntryFunctionData,
+  });
+  const pending = await aptos.signAndSubmitTransaction({
+    signer,
+    transaction,
+  });
+  const result = await aptos.waitForTransaction({
+    transactionHash: pending.hash,
+    options: { timeoutSecs: 30 },
+  });
+  return { txnHash: pending.hash, success: Boolean(result.success) };
 }

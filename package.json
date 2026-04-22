@@ -8,6 +8,7 @@
     "start": "NEXT_DIST_DIR=.next-prod.nosync next start",
     "lint": "next lint",
     "db:push": "drizzle-kit push",
+    "db:generate": "drizzle-kit generate",
     "db:seed": "tsx prisma/seed.ts",
     "db:setup": "drizzle-kit push && tsx prisma/seed.ts",
     "test": "vitest run",

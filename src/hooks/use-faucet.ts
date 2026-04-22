@@ -1,44 +1,89 @@
+"use client";
+
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
+
+import type { InputEntryFunctionData } from "@aptos-labs/ts-sdk";
+import {
+  aptos,
+  adminAddress,
+  buildClaimFaucetTxn,
+} from "@/lib/aptos";
 import { portfolioAddressQueryKey } from "./use-portfolio-query";
+import { FAUCET_AMOUNT } from "@/lib/constants";
+
+function bytesToHex(bytes: Uint8Array): string {
+  let hex = "0x";
+  for (const b of bytes) hex += b.toString(16).padStart(2, "0");
+  return hex;
+}
+
+interface SponsorResponse {
+  success?: boolean;
+  txnHash?: string;
+  error?: string;
+}
 
 export function useFaucet() {
-  const { account } = useWallet();
+  const { account, signTransaction } = useWallet();
   const address = account?.address?.toString() ?? undefined;
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
 
   const { mutate: claim, isPending } = useMutation<
-    { balance: number; claimed: number },
+    { txnHash: string; claimed: number },
     Error
   >({
     mutationFn: async () => {
-      const res = await fetch("/api/faucet", {
-        method: "POST",
-        cache: "no-store",
+      if (!account) throw new Error("Connect your wallet first");
+
+      // Build the sponsored transaction. Must set `withFeePayer: true` so the
+      // wallet produces a sender authenticator that commits to the admin as
+      // fee payer.
+      const payload = buildClaimFaucetTxn();
+      const rawTxn = await aptos.transaction.build.simple({
+        sender: account.address,
+        data: payload.data as InputEntryFunctionData,
+        withFeePayer: true,
+        options: {
+          expireTimestamp: Math.floor(Date.now() / 1000) + 60,
+        },
       });
 
-      let data: { error?: string; balance?: number; claimed?: number } | null = null;
+      // Attach the faucet-admin public address so the wallet knows whose
+      // signature it is delegating fee payment to.
+      const { AccountAddress } = await import("@aptos-labs/ts-sdk");
+      rawTxn.feePayerAddress = AccountAddress.fromString(adminAddress());
 
-      try {
-        data = await res.json();
-      } catch {
-        data = null;
+      const senderAuth = await signTransaction({
+        transactionOrPayload: rawTxn,
+      });
+
+      const transactionBytesHex = bytesToHex(rawTxn.bcsToBytes());
+      const senderAuthenticatorBytesHex = bytesToHex(
+        senderAuth.authenticator.bcsToBytes()
+      );
+
+      const res = await fetch("/api/faucet/sponsor", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({
+          transactionBytesHex,
+          senderAuthenticatorBytesHex,
+        }),
+      });
+
+      const data = (await res.json().catch(() => ({}))) as SponsorResponse;
+      if (!res.ok || !data.success || !data.txnHash) {
+        throw new Error(data.error ?? `faucet/sponsor returned ${res.status}`);
       }
 
-      if (!res.ok) {
-        throw new Error(data?.error || "Failed to claim VirtualUSD");
-      }
-
-      if (typeof data?.balance !== "number" || typeof data?.claimed !== "number") {
-        throw new Error("Invalid faucet response");
-      }
-
-      return data as { balance: number; claimed: number };
+      return { txnHash: data.txnHash, claimed: FAUCET_AMOUNT };
     },
-    onSuccess: (data) => {
-      setMessage(`+${data.claimed} VirtualUSD`);
+    onSuccess: ({ claimed }) => {
+      setMessage(`+${claimed} VirtualUSD`);
       queryClient.invalidateQueries({ queryKey: portfolioAddressQueryKey(address) });
       queryClient.invalidateQueries({ queryKey: ["auth-session"] });
       setTimeout(() => setMessage(""), 3000);
