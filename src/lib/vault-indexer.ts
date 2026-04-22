@@ -219,19 +219,29 @@ export async function runIndexerPass(
     txnsScanned += txns.length;
 
     const decoded: NewVaultEvent[] = [];
-    let maxVersion = cursor;
+    let maxSeq = cursor;
     for (const txn of txns) {
-      const version = BigInt(txn.version);
-      if (version > maxVersion) maxVersion = version;
+      // `start` / cursor use the account's per-sender sequence_number
+      // (monotonic u64). `transaction_version` is a global anchor that we
+      // keep in the decoded row for downstream joins, but cursoring on it
+      // would break because REST `start` expects sequence_number.
+      const seq = BigInt(
+        (txn as RestTransaction & { sequence_number?: string }).sequence_number ??
+          txn.version,
+      );
+      if (seq > maxSeq) maxSeq = seq;
       const events = txn.events ?? [];
       for (let i = 0; i < events.length; i++) {
         const ev = events[i];
         const spec = findSpec(ev.type, modAddr);
         if (!spec) continue;
-        const eventSeq = ev.sequence_number ?? String(i);
+        // Module-level `#[event]` emissions all report sequence_number=0.
+        // Use the event's index inside the transaction as the composite
+        // key with txn_hash so UNIQUE(txn_hash, event_seq) actually
+        // distinguishes sibling events in the same tx.
         const raw = {
           transaction_version: txn.version,
-          sequence_number: eventSeq,
+          sequence_number: String(i),
           indexed_type: ev.type,
           type: ev.type,
           data: ev.data,
@@ -259,7 +269,7 @@ export async function runIndexerPass(
       }
     }
 
-    cursor = maxVersion;
+    cursor = maxSeq;
     try {
       await dbOps.updateAllCursors(cursor);
     } catch (err) {
