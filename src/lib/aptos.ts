@@ -22,9 +22,9 @@
  *  - Hermes `binary.data[0]` is a length-1 array in sponsored price-update
  *    flow — do not iterate.
  *
- * STUB addresses (grep "STUB:" — Session B will replace):
+ * Env-filled by Session C (2026-04-22 testnet deploy):
  *   BASEMENT_MODULE_ADDRESS, VIRTUAL_USD_METADATA_ADDRESS, ADMIN_ADDRESS,
- *   PYTH_BTC_FEED_ID, PYTH_ETH_FEED_ID.
+ *   PYTH_BTC_FEED_ID, PYTH_ETH_FEED_ID. See .env / .env.example.
  */
 
 import {
@@ -94,7 +94,7 @@ export async function getChainId(client: Aptos = aptos): Promise<number> {
  * T4-02 — Lazy env validation
  * ------------------------------------------------------------------------ */
 
-const STUB = "0x_STUB_REPLACE_IN_SESSION_B"; // STUB: Session B replaces
+const STUB = "0x_STUB_REPLACE_IN_SESSION_B"; // retained as sentinel for env-not-overridden check
 
 /** Throw a helpful error naming the env var if it is unset or still a stub. */
 function requireEnv(name: string, allowStub = false): string {
@@ -102,31 +102,30 @@ function requireEnv(name: string, allowStub = false): string {
   if (!raw || raw.trim() === "") {
     throw new Error(
       `[aptos.ts] Required env var ${name} is not set. ` +
-        `Add it to .env.local (see .env.example). ` +
-        `Session B will fill in the real address after Move deploy.`,
+        `Add it to .env (see .env.example). Filled in Session C (2026-04-22 testnet deploy).`,
     );
   }
   if (!allowStub && raw === STUB) {
     throw new Error(
-      `[aptos.ts] Env var ${name} is still the Session A stub "${STUB}". ` +
-        `Session B must replace this with the deployed Move address before builders can run.`,
+      `[aptos.ts] Env var ${name} is still a stub "${STUB}". ` +
+        `Session C provided real testnet values; ensure .env is loaded.`,
     );
   }
   return raw;
 }
 
 /** Module address (e.g. `0xabc...` — basement core modules live here). */
-// STUB: BASEMENT_MODULE_ADDRESS defaults to 0x_STUB_REPLACE_IN_SESSION_B until Move deploy.
+// NOTE: Session C filled .env with 0xb3a8d906...f55f2ff7 (Aptos testnet).
 export function moduleAddress(): string {
   return requireEnv("BASEMENT_MODULE_ADDRESS");
 }
 /** Virtual USD Fungible Asset metadata object address. */
-// STUB: VIRTUAL_USD_METADATA_ADDRESS defaults to 0x_STUB_REPLACE_IN_SESSION_B until FA deploy.
+// NOTE: Session C filled .env with 0xec45012f...21071c89 (Aptos testnet, derived from init_module).
 export function virtualUsdMetadataAddress(): string {
   return requireEnv("VIRTUAL_USD_METADATA_ADDRESS");
 }
 /** Public admin address (sponsor / resolver). Private key NEVER read here. */
-// STUB: ADMIN_ADDRESS defaults to 0x_STUB_REPLACE_IN_SESSION_B until sponsor account provisioned.
+// NOTE: Session C v0 testnet uses 1-key-packed: ADMIN_ADDRESS = BASEMENT_MODULE_ADDRESS.
 export function adminAddress(): string {
   return requireEnv("ADMIN_ADDRESS");
 }
@@ -134,13 +133,11 @@ export function adminAddress(): string {
 export function pythHermesUrl(): string {
   return process.env.PYTH_HERMES_URL || "https://hermes.pyth.network";
 }
-// STUB: PYTH_BTC_FEED_ID defaults to 0x_STUB_REPLACE_IN_SESSION_B — replace with
-// real feed id `0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43` in Session B.
+// NOTE: Pyth BTC/USD canonical feed id — same on mainnet + testnet + Aptos. Session C filled .env.
 export function pythBtcFeedId(): string {
   return requireEnv("PYTH_BTC_FEED_ID");
 }
-// STUB: PYTH_ETH_FEED_ID defaults to 0x_STUB_REPLACE_IN_SESSION_B — replace with
-// real feed id `0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace` in Session B.
+// NOTE: Pyth ETH/USD canonical feed id — same on mainnet + testnet + Aptos. Session C filled .env.
 export function pythEthFeedId(): string {
   return requireEnv("PYTH_ETH_FEED_ID");
 }

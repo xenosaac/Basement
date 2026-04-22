@@ -65,11 +65,11 @@ describe("env-missing builders throw with helpful messages", () => {
     );
   });
 
-  it("throws when BASEMENT_MODULE_ADDRESS is still the Session A stub", async () => {
+  it("throws when BASEMENT_MODULE_ADDRESS is still the stub sentinel", async () => {
     setEnvHappy();
     process.env.BASEMENT_MODULE_ADDRESS = "0x_STUB_REPLACE_IN_SESSION_B";
     const mod = await import("../aptos");
-    expect(() => mod.buildClaimWinningsTxn(1n)).toThrow(/Session B/);
+    expect(() => mod.buildClaimWinningsTxn(1n)).toThrow(/still a stub/);
   });
 });
 
