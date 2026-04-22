@@ -80,3 +80,6 @@ next-env.d.ts
 
 # local tooling (like .claude/)
 .gstack/
+# Move build artifacts
+move/basement/build/
+.aptos/
