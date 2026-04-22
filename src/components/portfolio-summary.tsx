@@ -1,18 +1,21 @@
 "use client";
 
 import { useUser } from "@/hooks/use-user";
+import { usePortfolio } from "@/hooks/use-portfolio";
 import { formatUSD } from "@/lib/utils";
 import { FaucetButton } from "./faucet-button";
 
 export function PortfolioSummary() {
   const user = useUser();
+  const { data: portfolio } = usePortfolio();
 
   if (!user.isConnected) {
     return <div className="glass rounded-lg p-6 h-24 animate-pulse" />;
   }
 
-  // TODO: Session B contract deploy → read on-chain VirtualUSD balance via aptos.ts
-  const balance = 0;
+  // TEMPORARY: reads v0 DB balance via /api/portfolio. Session D will rewire
+  // this to read on-chain VirtualUSD FA balance via src/lib/aptos.ts.
+  const balance = portfolio?.balance ?? 0;
 
   return (
     <div className="glass rounded-lg p-6 flex items-center justify-between">

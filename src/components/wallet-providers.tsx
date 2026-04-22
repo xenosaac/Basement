@@ -4,12 +4,13 @@ import { AptosWalletAdapterProvider } from "@aptos-labs/wallet-adapter-react";
 import { Network } from "@aptos-labs/ts-sdk";
 import { AptosAuthProvider } from "./aptos-auth-provider";
 
-/**
- * AIP-62 brands we opt into. Petra + OKX Wallet auto-register via the
- * wallet standard; no plugin imports needed. Martian + Binance deferred
- * to v1 per memory `project_p2_wallet_multichain_requirement.md`.
- */
-const OPT_IN_WALLETS: Array<"Petra" | "OKX Wallet"> = ["Petra", "OKX Wallet"];
+const OPT_IN_WALLETS = [
+  "OKX Wallet",
+  "Bitget Wallet",
+  "Petra",
+  "Backpack",
+  "Nightly",
+] as const;
 
 function resolveNetwork(): Network {
   const raw = (process.env.NEXT_PUBLIC_APTOS_NETWORK ?? "testnet").toLowerCase();

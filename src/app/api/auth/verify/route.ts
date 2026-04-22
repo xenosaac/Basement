@@ -2,10 +2,25 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   consumeNonce,
   createSessionCookie,
-  expectedAuthMessage,
   normalizeAptosAddress,
   verifyAptosSignature,
 } from "@/lib/auth";
+import { AUTH_STATEMENT, getAuthChainId } from "@/lib/constants";
+
+/**
+ * Derive the expected domain from the request. Client-side builds the auth
+ * message with `window.location.host`; the server must match the actual host
+ * the browser used, not a hardcoded constant. `NEXT_PUBLIC_AUTH_DOMAIN` still
+ * wins as an explicit override for deployments that terminate TLS behind a
+ * proxy (the Host header may not reflect the canonical dapp domain).
+ */
+function resolveExpectedDomain(request: NextRequest): string {
+  const override = process.env.NEXT_PUBLIC_AUTH_DOMAIN;
+  if (override) return override;
+  const host = request.headers.get("host");
+  if (host) return host;
+  return "basement";
+}
 
 export const dynamic = "force-dynamic";
 
@@ -54,14 +69,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // R-4: the 5-field expected message must appear verbatim inside the
-    // wrapped fullMessage produced by the wallet.
-    const expected = expectedAuthMessage(normalized, nonce);
-    if (!fullMessage.includes(expected)) {
-      return NextResponse.json(
-        { error: "Message mismatch" },
-        { status: 400 },
-      );
+    // R-4: each of the 5 required fields must appear as `key: value` substring
+    // inside the wrapped fullMessage. Wallets differ in how they frame the
+    // raw message (Petra: APTOS\nmessage: ...\nnonce: ...; OKX wraps
+    // differently), so matching the 5-field block verbatim is too brittle.
+    // Security is preserved: the Ed25519 signature still covers the entire
+    // fullMessage, so an attacker cannot splice or alter any byte.
+    const requiredFields: Record<string, string> = {
+      domain: resolveExpectedDomain(request),
+      chainId: String(getAuthChainId()),
+      nonce,
+      address: normalized,
+      statement: AUTH_STATEMENT,
+    };
+    for (const [key, value] of Object.entries(requiredFields)) {
+      if (!fullMessage.includes(`${key}: ${value}`)) {
+        return NextResponse.json(
+          { error: `Message field missing: ${key}` },
+          { status: 400 },
+        );
+      }
     }
 
     const ok = verifyAptosSignature(publicKey, fullMessage, signature);

@@ -1,7 +1,7 @@
 import Link from "next/link";
 import Image from "next/image";
 
-const GITHUB_URL = "https://github.com";
+const GITHUB_URL = "https://github.com/xenosaac/Basement";
 
 export default function LandingPage() {
   return (

@@ -38,8 +38,9 @@ export function TradePanel({
 
   const isSell = direction === "SELL";
   const numAmount = parseFloat(amount) || 0;
-  // TODO: Session B contract deploy → read on-chain balance via aptos.ts
-  const balance = 0;
+  // TEMPORARY: reads v0 DB balance via /api/portfolio. Session D will rewire
+  // this to read on-chain VirtualUSD FA balance via src/lib/aptos.ts.
+  const balance = portfolio?.balance ?? 0;
   const isOpen = state === "OPEN";
 
   // Find current position for sell mode
