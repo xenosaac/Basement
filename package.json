@@ -11,6 +11,7 @@
     "db:generate": "drizzle-kit generate",
     "db:seed": "tsx prisma/seed.ts",
     "db:setup": "drizzle-kit push && tsx prisma/seed.ts",
+    "indexer:backfill": "tsx scripts/indexer-backfill.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
