@@ -66,15 +66,28 @@ export function MarketGrid({ initialData }: { initialData?: MarketsResponse }) {
     };
     const recurringMarkets: MarketWithPrices[] = [];
 
+    const nowMs = Date.now();
     for (const market of allMarkets) {
-      // Quick Play strip surfaces active, open recurring markets at the top
-      // of the page. Duplication with the category tabs is intentional —
-      // Quick Play is a featured strip; tabs are the catalog.
-      if (
-        market.marketType === "RECURRING" &&
-        market.state === "OPEN" &&
-        isActiveRecurringGroupId(market.recurringGroupId)
-      ) {
+      // Catalog semantics: only show markets currently tradeable.
+      // Resolved / closed-pending-resolve / drained markets are hidden here
+      // — Portfolio page surfaces historical positions.
+      if (market.state !== "OPEN") continue;
+
+      if (market.marketType === "RECURRING") {
+        // Recurring markets must be backed by an active group in the
+        // registry. This filters zombie rows from deprecated cadences
+        // (e.g., old btc-15m / eth-15m that predated the 3-min pivot).
+        if (!isActiveRecurringGroupId(market.recurringGroupId)) continue;
+      } else if (market.closeTime && Date.parse(market.closeTime) <= nowMs) {
+        // Standalone markets: hide once close_time is past (legacy test
+        // data that never resolved).
+        continue;
+      }
+
+      // Quick Play strip surfaces active recurring markets at the top.
+      // Duplication with the category tabs is intentional — Quick Play is
+      // a featured strip, tabs are the catalog.
+      if (market.marketType === "RECURRING") {
         recurringMarkets.push(market);
       }
 
