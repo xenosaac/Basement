@@ -3,23 +3,35 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import { useMarkets } from "@/hooks/use-markets";
 import { MarketCard } from "./market-card";
-import { isActiveRecurringGroupId } from "@/lib/market-groups";
+import {
+  isActiveRecurringGroupId,
+  categoryForRecurringGroupId,
+  sortNameForRecurringGroupId,
+  type Category,
+} from "@/lib/market-groups";
 import type { MarketsResponse, MarketWithPrices } from "@/types";
 
-const CATEGORIES = [
+type TabValue = Category | "all";
+
+const CATEGORIES: { label: string; value: TabValue }[] = [
   { label: "All", value: "all" },
-  { label: "BTC", value: "btc" },
-  { label: "ETH", value: "eth" },
   { label: "Crypto", value: "crypto" },
-  { label: "Other", value: "other" },
+  { label: "Stocks", value: "stocks" },
+  { label: "Commodity", value: "commodity" },
+  { label: "Others", value: "others" },
 ];
 
-function categorize(market: MarketWithPrices): string {
-  const q = market.question.toLowerCase();
-  if (q.includes("bitcoin") || q.includes("btc")) return "btc";
-  if (q.includes("ethereum") || q.includes("eth")) return "eth";
-  if (q.includes("solana") || q.includes("sol") || q.includes("crypto") || q.includes("token")) return "crypto";
-  return "other";
+// Tabs that currently have no live markets. Shown with a minimal "Coming Soon"
+// placeholder instead of the generic "No markets" empty state.
+const COMING_SOON_TABS: ReadonlySet<TabValue> = new Set<TabValue>([
+  "stocks",
+  "others",
+]);
+
+function compareBySortName(a: MarketWithPrices, b: MarketWithPrices): number {
+  const sa = sortNameForRecurringGroupId(a.recurringGroupId) ?? a.question;
+  const sb = sortNameForRecurringGroupId(b.recurringGroupId) ?? b.question;
+  return sa.localeCompare(sb);
 }
 
 function getCountdownLabel(closeTime: string, now: number) {
@@ -40,36 +52,43 @@ function Countdown({ closeTime, now }: { closeTime: string; now: number }) {
 
 export function MarketGrid({ initialData }: { initialData?: MarketsResponse }) {
   const { data, isLoading, error } = useMarkets({ initialData });
-  const [activeTab, setActiveTab] = useState("all");
+  const [activeTab, setActiveTab] = useState<TabValue>("all");
   const [now, setNow] = useState(() => Date.now());
 
   const groupedMarkets = useMemo(() => {
     const allMarkets = data?.markets ?? [];
-    const regularByCategory: Record<string, MarketWithPrices[]> = {
+    const byCategory: Record<TabValue, MarketWithPrices[]> = {
       all: [],
-      btc: [],
-      eth: [],
       crypto: [],
-      other: [],
+      stocks: [],
+      commodity: [],
+      others: [],
     };
     const recurringMarkets: MarketWithPrices[] = [];
 
     for (const market of allMarkets) {
-      if (market.marketType === "RECURRING") {
-        if (
-          market.state === "OPEN" &&
-          isActiveRecurringGroupId(market.recurringGroupId)
-        ) {
-          recurringMarkets.push(market);
-        }
-        continue;
+      // Quick Play strip surfaces active, open recurring markets at the top
+      // of the page. Duplication with the category tabs is intentional —
+      // Quick Play is a featured strip; tabs are the catalog.
+      if (
+        market.marketType === "RECURRING" &&
+        market.state === "OPEN" &&
+        isActiveRecurringGroupId(market.recurringGroupId)
+      ) {
+        recurringMarkets.push(market);
       }
 
-      regularByCategory.all.push(market);
-      regularByCategory[categorize(market)].push(market);
+      byCategory.all.push(market);
+      const cat = categoryForRecurringGroupId(market.recurringGroupId);
+      byCategory[cat].push(market);
     }
 
-    return { recurringMarkets, regularByCategory };
+    for (const key of Object.keys(byCategory) as TabValue[]) {
+      byCategory[key].sort(compareBySortName);
+    }
+    recurringMarkets.sort(compareBySortName);
+
+    return { recurringMarkets, regularByCategory: byCategory };
   }, [data?.markets]);
 
   const { recurringMarkets, regularByCategory } = groupedMarkets;
@@ -147,10 +166,18 @@ export function MarketGrid({ initialData }: { initialData?: MarketsResponse }) {
 
       {/* Market list */}
       {filtered.length === 0 ? (
-        <div className="text-center py-16">
-          <p className="text-white/40 mb-1">No markets in this category.</p>
-          <p className="text-xs text-white/25">Check back soon for new markets.</p>
-        </div>
+        COMING_SOON_TABS.has(activeTab) ? (
+          <div className="text-center py-16">
+            <p className="text-xs uppercase tracking-[3px] text-white/35">
+              Coming Soon
+            </p>
+          </div>
+        ) : (
+          <div className="text-center py-16">
+            <p className="text-white/40 mb-1">No markets in this category.</p>
+            <p className="text-xs text-white/25">Check back soon for new markets.</p>
+          </div>
+        )
       ) : (
         <div className="space-y-3">
           {filtered.map((market) => (

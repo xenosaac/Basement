@@ -13,20 +13,31 @@
  */
 import { pythBtcFeedId, pythEthFeedId } from "./aptos";
 
-export type ResolutionKind = "pyth" | "manual" | "ucrt";
+export type ResolutionKind = "pyth" | "switchboard" | "supra" | "manual" | "ucrt";
 export type SpawnCadence =
   | "on-resolve"
   | "daily-00-utc"
   | "weekly-friday"
   | "manual";
 
+/** UI-level asset class bucket. Drives the Crypto/Stocks/Commodity/Others tabs
+ *  in market-grid.tsx. Declared here so the registry is the single source. */
+export type Category = "crypto" | "stocks" | "commodity" | "others";
+
 export interface MarketGroupSpec {
   groupId: string;
   assetSymbol: string;
+  /** Top-level tab on the markets page. */
+  category: Category;
+  /** Alphabetical sort key within a tab (e.g. "BTC" / "ETH" / "XAU"). */
+  sortName: string;
   resolutionKind: ResolutionKind;
   /** Hex bytes32 Pyth feed id. Left empty in the literal; resolve via
    *  {@link pythFeedForGroup} which reads env lazily. */
   pythFeedId?: string;
+  /** Switchboard Aptos aggregator object address (hex). Populated for
+   *  resolutionKind === "switchboard" groups after the 1c spike. */
+  switchboardAggregatorAddr?: string;
   durationSec: number;
   /** Strike-rounding tick in Pyth 1e8 fixed-point (BTC $500 = 50_000_000_000n). */
   tickSize: bigint;
@@ -42,6 +53,8 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
   "btc-3m": {
     groupId: "btc-3m",
     assetSymbol: "BTC",
+    category: "crypto",
+    sortName: "BTC",
     resolutionKind: "pyth",
     pythFeedId: "",
     durationSec: 180,
@@ -56,6 +69,8 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
   "eth-3m": {
     groupId: "eth-3m",
     assetSymbol: "ETH",
+    category: "crypto",
+    sortName: "ETH",
     resolutionKind: "pyth",
     pythFeedId: "",
     durationSec: 180,
@@ -93,6 +108,30 @@ export function activeGroupsByCadence(c: SpawnCadence): MarketGroupSpec[] {
 
 export function groupById(id: string): MarketGroupSpec | undefined {
   return MARKET_GROUPS[id];
+}
+
+/**
+ * Resolve the UI category for a market. Recurring markets derive their
+ * category from the registry; standalone markets (rare after Slice 4) fall
+ * back to "others". Kept here so UI and backend share one definition.
+ */
+export function categoryForRecurringGroupId(
+  groupId: string | null | undefined,
+): Category {
+  if (!groupId) return "others";
+  return MARKET_GROUPS[groupId]?.category ?? "others";
+}
+
+/**
+ * Alphabetical sort key. Returns the registry `sortName` when the market is
+ * recurring; otherwise falls back to the market's own question for stable
+ * ordering.
+ */
+export function sortNameForRecurringGroupId(
+  groupId: string | null | undefined,
+): string | null {
+  if (!groupId) return null;
+  return MARKET_GROUPS[groupId]?.sortName ?? null;
 }
 
 /**
