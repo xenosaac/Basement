@@ -11,6 +11,7 @@ import {
 } from "@/lib/aptos";
 import { portfolioOnChainQueryKey } from "./use-portfolio-onchain";
 import { FAUCET_AMOUNT } from "@/lib/constants";
+import { useAptosAuth } from "@/components/aptos-auth-provider";
 
 function bytesToHex(bytes: Uint8Array): string {
   let hex = "0x";
@@ -25,7 +26,8 @@ interface SponsorResponse {
 }
 
 export function useFaucet() {
-  const { account, signTransaction } = useWallet();
+  const { account, signTransaction, signAndSubmitTransaction } = useWallet();
+  const { supportsFeePayer } = useAptosAuth();
   const address = account?.address?.toString() ?? undefined;
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
@@ -37,9 +39,23 @@ export function useFaucet() {
     mutationFn: async () => {
       if (!account) throw new Error("Connect your wallet first");
 
-      // Build the sponsored transaction. Must set `withFeePayer: true` so the
-      // wallet produces a sender authenticator that commits to the admin as
-      // fee payer.
+      // Wallet-capability split:
+      //   Petra → sponsored (admin pays gas, user sees zero-gas magic).
+      //   Everything else → direct claim (user pays own testnet gas ~0.0001 APT).
+      // See src/components/aptos-auth-provider.tsx::detectFeePayerSupport for
+      // why other wallets can't reliably attach a fee-payer authenticator.
+      if (!supportsFeePayer) {
+        const payload = buildClaimFaucetTxn();
+        const result = await signAndSubmitTransaction({
+          sender: account.address,
+          data: payload.data as InputEntryFunctionData,
+        });
+        await aptos.waitForTransaction({ transactionHash: result.hash });
+        return { txnHash: result.hash, claimed: FAUCET_AMOUNT };
+      }
+
+      // Sponsored path (Petra). `withFeePayer: true` is required so the wallet
+      // produces a sender authenticator that commits to the admin as fee payer.
       const payload = buildClaimFaucetTxn();
       const rawTxn = await aptos.transaction.build.simple({
         sender: account.address,

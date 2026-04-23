@@ -54,9 +54,14 @@ function buildAuthMessage(args: {
 }
 
 function detectFeePayerSupport(walletName: string | undefined | null): boolean {
-  // Advisory — Petra is the reference AIP-62 implementation and supports
-  // signTransaction({asFeePayer:true}) natively. OKX fee-payer support
-  // is unconfirmed (see docs/aptos-research/02-wallets.md §OKX).
+  // Advisory capability: Petra is the reference AIP-62 implementation and
+  // handles signTransaction({asFeePayer:true}) natively, so the faucet can
+  // run fully sponsored (admin pays gas). OKX / Bitget / Nightly / Backpack
+  // don't consistently honor the fee-payer authenticator — on those wallets
+  // the sponsored tx is rendered as a regular sender-paid tx, which blocks
+  // the claim with "Insufficient balance" when the user's wallet is on a
+  // chain where they have no APT. For those wallets use-faucet.ts falls
+  // back to a direct (user-paid) claim; Aptos testnet gas is ~0.0001 APT.
   if (!walletName) return false;
   if (walletName === "Petra") return true;
   return false;
