@@ -108,32 +108,81 @@ function requireEnv(name: string, publicName?: string, allowStub = false): strin
   return raw;
 }
 
+/**
+ * Client-exposed env getters below use explicit static `process.env.FOO`
+ * accesses (not dynamic bracket lookup via {@link requireEnv}) because
+ * Next.js only inlines `NEXT_PUBLIC_*` vars into the browser bundle when
+ * the property name is a string literal. A dynamic `process.env[name]`
+ * reads undefined in the browser even if the var is set in .env.
+ */
+function pickStatic(
+  label: string,
+  serverValue: string | undefined,
+  publicValue: string | undefined,
+): string {
+  const raw = (serverValue && serverValue.trim()) || (publicValue && publicValue.trim()) || "";
+  if (!raw) {
+    throw new Error(
+      `[aptos.ts] Required env var ${label} is not set. ` +
+        `Add it to .env (see .env.example). Filled in Session C (2026-04-22 testnet deploy).`,
+    );
+  }
+  if (raw === STUB) {
+    throw new Error(
+      `[aptos.ts] Env var ${label} is still a stub "${STUB}". ` +
+        `Session C provided real testnet values; ensure .env is loaded.`,
+    );
+  }
+  return raw;
+}
+
 /** Module address (e.g. `0xabc...` — basement core modules live here). */
 // NOTE: Session C filled .env with 0xb3a8d906...f55f2ff7 (Aptos testnet).
 export function moduleAddress(): string {
-  return requireEnv("BASEMENT_MODULE_ADDRESS", "NEXT_PUBLIC_BASEMENT_MODULE_ADDRESS");
+  return pickStatic(
+    "BASEMENT_MODULE_ADDRESS (or NEXT_PUBLIC_BASEMENT_MODULE_ADDRESS)",
+    process.env.BASEMENT_MODULE_ADDRESS,
+    process.env.NEXT_PUBLIC_BASEMENT_MODULE_ADDRESS,
+  );
 }
 /** Virtual USD Fungible Asset metadata object address. */
 // NOTE: Session C filled .env with 0xec45012f...21071c89 (Aptos testnet, derived from init_module).
 export function virtualUsdMetadataAddress(): string {
-  return requireEnv("VIRTUAL_USD_METADATA_ADDRESS", "NEXT_PUBLIC_VIRTUAL_USD_METADATA_ADDRESS");
+  return pickStatic(
+    "VIRTUAL_USD_METADATA_ADDRESS (or NEXT_PUBLIC_VIRTUAL_USD_METADATA_ADDRESS)",
+    process.env.VIRTUAL_USD_METADATA_ADDRESS,
+    process.env.NEXT_PUBLIC_VIRTUAL_USD_METADATA_ADDRESS,
+  );
 }
 /** Public admin address (sponsor / resolver). Private key NEVER read here. */
 // NOTE: Session C v0 testnet uses 1-key-packed: ADMIN_ADDRESS = BASEMENT_MODULE_ADDRESS.
 export function adminAddress(): string {
-  return requireEnv("ADMIN_ADDRESS", "NEXT_PUBLIC_ADMIN_ADDRESS");
+  return pickStatic(
+    "ADMIN_ADDRESS (or NEXT_PUBLIC_ADMIN_ADDRESS)",
+    process.env.ADMIN_ADDRESS,
+    process.env.NEXT_PUBLIC_ADMIN_ADDRESS,
+  );
 }
 /** Pyth Hermes base URL — always defaults to public relay. */
 export function pythHermesUrl(): string {
   return process.env.PYTH_HERMES_URL || "https://hermes.pyth.network";
 }
 // NOTE: Pyth BTC/USD canonical feed id — same on mainnet + testnet + Aptos. Session C filled .env.
+// Feed ids are public constants, safe to ship to browser bundle via NEXT_PUBLIC_.
 export function pythBtcFeedId(): string {
-  return requireEnv("PYTH_BTC_FEED_ID");
+  return pickStatic(
+    "PYTH_BTC_FEED_ID (or NEXT_PUBLIC_PYTH_BTC_FEED_ID)",
+    process.env.PYTH_BTC_FEED_ID,
+    process.env.NEXT_PUBLIC_PYTH_BTC_FEED_ID,
+  );
 }
 // NOTE: Pyth ETH/USD canonical feed id — same on mainnet + testnet + Aptos. Session C filled .env.
 export function pythEthFeedId(): string {
-  return requireEnv("PYTH_ETH_FEED_ID");
+  return pickStatic(
+    "PYTH_ETH_FEED_ID (or NEXT_PUBLIC_PYTH_ETH_FEED_ID)",
+    process.env.PYTH_ETH_FEED_ID,
+    process.env.NEXT_PUBLIC_PYTH_ETH_FEED_ID,
+  );
 }
 
 /* ---------------------------------------------------------------------------
