@@ -3,7 +3,7 @@
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { useFaucet } from "@/hooks/use-faucet";
 import { useUser } from "@/hooks/use-user";
-import { usePortfolio } from "@/hooks/use-portfolio";
+import { usePortfolioOnChain } from "@/hooks/use-portfolio-onchain";
 import { useAptosAuth } from "./aptos-auth-provider";
 
 export function FaucetBannerInner() {
@@ -11,11 +11,9 @@ export function FaucetBannerInner() {
   const user = useUser();
   const { isAuthenticated } = useAptosAuth();
   const { claim, isPending, message } = useFaucet();
-  const { data: portfolio } = usePortfolio();
+  const { data: portfolio } = usePortfolioOnChain();
 
-  // TEMPORARY: reads v0 DB balance via /api/portfolio. Session D will rewire
-  // this to read on-chain VirtualUSD FA balance via src/lib/aptos.ts.
-  const balance = portfolio?.balance ?? 0;
+  const balance = Number(portfolio?.balance ?? 0n) / 1_000_000;
   if (!isConnected || !isAuthenticated || !user || balance > 0) {
     return null;
   }

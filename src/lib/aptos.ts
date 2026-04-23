@@ -77,20 +77,6 @@ export function getAptos(network?: AptosNetwork | Network): Aptos {
 /** Default client (v0 == testnet). Lazy: constructor is pure, no network I/O. */
 export const aptos: Aptos = getAptos();
 
-/**
- * Runtime chainId fetch (R-4). Callers should use this rather than hardcode.
- * Cached per-client after first successful read.
- */
-const _chainIdCache = new WeakMap<Aptos, number>();
-export async function getChainId(client: Aptos = aptos): Promise<number> {
-  const hit = _chainIdCache.get(client);
-  if (hit !== undefined) return hit;
-  const info = await client.getLedgerInfo();
-  const id = Number((info as { chain_id: number | string }).chain_id);
-  _chainIdCache.set(client, id);
-  return id;
-}
-
 /* ---------------------------------------------------------------------------
  * T4-02 — Lazy env validation
  * ------------------------------------------------------------------------ */
@@ -98,17 +84,24 @@ export async function getChainId(client: Aptos = aptos): Promise<number> {
 const STUB = "0x_STUB_REPLACE_IN_SESSION_B"; // retained as sentinel for env-not-overridden check
 
 /** Throw a helpful error naming the env var if it is unset or still a stub. */
-function requireEnv(name: string, allowStub = false): string {
-  const raw = process.env[name];
+function requireEnv(name: string, publicName?: string, allowStub = false): string {
+  let raw = process.env[name];
   if (!raw || raw.trim() === "") {
+    if (publicName) {
+      raw = process.env[publicName];
+    }
+  }
+  if (!raw || raw.trim() === "") {
+    const label = publicName ? `${name} (or ${publicName})` : name;
     throw new Error(
-      `[aptos.ts] Required env var ${name} is not set. ` +
+      `[aptos.ts] Required env var ${label} is not set. ` +
         `Add it to .env (see .env.example). Filled in Session C (2026-04-22 testnet deploy).`,
     );
   }
   if (!allowStub && raw === STUB) {
+    const label = publicName ? `${name}/${publicName}` : name;
     throw new Error(
-      `[aptos.ts] Env var ${name} is still a stub "${STUB}". ` +
+      `[aptos.ts] Env var ${label} is still a stub "${STUB}". ` +
         `Session C provided real testnet values; ensure .env is loaded.`,
     );
   }
@@ -118,17 +111,17 @@ function requireEnv(name: string, allowStub = false): string {
 /** Module address (e.g. `0xabc...` — basement core modules live here). */
 // NOTE: Session C filled .env with 0xb3a8d906...f55f2ff7 (Aptos testnet).
 export function moduleAddress(): string {
-  return requireEnv("BASEMENT_MODULE_ADDRESS");
+  return requireEnv("BASEMENT_MODULE_ADDRESS", "NEXT_PUBLIC_BASEMENT_MODULE_ADDRESS");
 }
 /** Virtual USD Fungible Asset metadata object address. */
 // NOTE: Session C filled .env with 0xec45012f...21071c89 (Aptos testnet, derived from init_module).
 export function virtualUsdMetadataAddress(): string {
-  return requireEnv("VIRTUAL_USD_METADATA_ADDRESS");
+  return requireEnv("VIRTUAL_USD_METADATA_ADDRESS", "NEXT_PUBLIC_VIRTUAL_USD_METADATA_ADDRESS");
 }
 /** Public admin address (sponsor / resolver). Private key NEVER read here. */
 // NOTE: Session C v0 testnet uses 1-key-packed: ADMIN_ADDRESS = BASEMENT_MODULE_ADDRESS.
 export function adminAddress(): string {
-  return requireEnv("ADMIN_ADDRESS");
+  return requireEnv("ADMIN_ADDRESS", "NEXT_PUBLIC_ADMIN_ADDRESS");
 }
 /** Pyth Hermes base URL — always defaults to public relay. */
 export function pythHermesUrl(): string {
@@ -152,8 +145,9 @@ export type CaseId = bigint;
 
 /** Case lifecycle state (matches Move enum; 3 = drained). */
 export type CaseStateCode = 0 | 1 | 2 | 3;
-/** Resolved outcome: 0 = unresolved, 1 = YES, 2 = NO. */
-export type OutcomeCode = 0 | 1 | 2;
+/** Resolved outcome (matches Move `case_vault.move:51-54`).
+ *  0 = YES, 1 = NO, 2 = INVALID, 255 = UNSET (no resolution yet). */
+export type OutcomeCode = 0 | 1 | 2 | 255;
 
 export interface CaseState {
   caseId: CaseId;
@@ -349,7 +343,8 @@ export function parseCaseVaultResource(
   };
 }
 
-/** Read case state from chain. */
+/** Read case state from chain. `CaseVault` + `MarketConfig` live at the
+ *  same object address; parse merges both so callers get a single shape. */
 export async function readCaseState(
   caseId: CaseId,
   client: Aptos = aptos,
@@ -361,12 +356,28 @@ export async function readCaseState(
       functionArguments: [caseId.toString()],
     } satisfies InputViewFunctionData,
   });
-  const resource = await client.getAccountResource({
-    accountAddress: vaultAddress,
-    resourceType:
-      `${moduleAddress()}::case_vault::CaseVault` as `${string}::${string}::${string}`,
+  const [vaultRes, configRes] = await Promise.all([
+    client.getAccountResource({
+      accountAddress: vaultAddress,
+      resourceType:
+        `${moduleAddress()}::case_vault::CaseVault` as `${string}::${string}::${string}`,
+    }),
+    client.getAccountResource({
+      accountAddress: vaultAddress,
+      resourceType:
+        `${moduleAddress()}::case_vault::MarketConfig` as `${string}::${string}::${string}`,
+    }),
+  ]);
+  const vaultData =
+    (vaultRes as { data?: Record<string, unknown> }).data ??
+    (vaultRes as Record<string, unknown>);
+  const configData =
+    (configRes as { data?: Record<string, unknown> }).data ??
+    (configRes as Record<string, unknown>);
+  return parseCaseVaultResource(caseId, vaultAddress, {
+    ...configData,
+    ...vaultData,
   });
-  return parseCaseVaultResource(caseId, vaultAddress, resource);
 }
 
 /* ---------------------------------------------------------------------------
@@ -495,18 +506,35 @@ async function simulateBuy(
     },
   });
   const [sim] = await client.transaction.simulate.simple({ transaction: txn });
-  // Shares-out is emitted as a return-or-event — Move entry fns don't return,
-  // so approximation via constant-product reserve math is fine for UX.
-  const reserve = fn === "buy_yes" ? state.yesReserve : state.noReserve;
-  const k = state.yesReserve * state.noReserve;
-  const otherReserve = fn === "buy_yes" ? state.noReserve : state.yesReserve;
-  // new_other = k / (reserve + amountIn) ; expectedSharesOut = other - new_other
-  const newOther =
-    reserve + amountIn === 0n ? otherReserve : k / (reserve + amountIn);
-  const expectedSharesOut =
-    otherReserve > newOther ? otherReserve - newOther : 0n;
+  // Move-aligned CPMM quote (pure bigint ≡ Move u128):
+  //   fee: case_vault.move:563 — amount_in_after_fee = amount_in * (10000 - fee_bps) / 10000
+  //   CPMM: case_vault.move:470-483,567-596 —
+  //     buy_yes → reserve_in = no_reserve (grows), reserve_out = yes_reserve (shrinks)
+  //     buy_no  → reserve_in = yes_reserve,        reserve_out = no_reserve
+  //     k = reserve_in * reserve_out;
+  //     new_reserve_out = k / (reserve_in + amount_in_after_fee);
+  //     shares = reserve_out - new_reserve_out.
+  const BPS_BASE = 10_000n;
+  const feeBpsBig = BigInt(state.feeBps);
+  const amountInAfterFee = (amountIn * (BPS_BASE - feeBpsBig)) / BPS_BASE;
+
+  const reserveIn = fn === "buy_yes" ? state.noReserve : state.yesReserve;
+  const reserveOut = fn === "buy_yes" ? state.yesReserve : state.noReserve;
+
+  let expectedSharesOut = 0n;
+  if (reserveIn > 0n && reserveOut > 0n) {
+    const k = reserveIn * reserveOut;
+    const newReserveIn = reserveIn + amountInAfterFee;
+    const newReserveOut = newReserveIn === 0n ? reserveOut : k / newReserveIn;
+    expectedSharesOut =
+      reserveOut > newReserveOut ? reserveOut - newReserveOut : 0n;
+  }
+
+  // priceImpactBps: amountIn / (reserveOut + amountInAfterFee) * 10000, bounded ≤ 10000 → Number safe.
   const priceImpactBps =
-    reserve === 0n ? 0 : Number((amountIn * 10000n) / (reserve + amountIn));
+    reserveOut === 0n
+      ? 0
+      : Number((amountIn * 10_000n) / (reserveOut + amountInAfterFee));
   const gasEstimate = toBigInt(
     (sim as { gas_used?: string | number }).gas_used ?? 0,
   );
@@ -675,10 +703,50 @@ export function buildSponsoredTxn(input: BuildSponsoredInput): SponsoredTxnOutpu
  * Fetch a single VAA for a Pyth feed. Hermes returns `binary.data` as an
  * array of base64 strings — RED FLAG: for single-feed queries it is always
  * length 1 (Wormhole batch wrapper). Do NOT iterate.
+ *
+ * NO CACHE: resolve_oracle requires the VAA's `publish_time >= close_time`;
+ * a cached pre-close VAA would fail Move's staleness check with
+ * `E_STALE_PRICE`. Hermes round-trip is ~200-300ms — cheap enough to always
+ * fetch fresh.
  */
+/**
+ * Fetch the parsed current price for a Pyth feed. Returns price at Pyth's
+ * canonical 1e8 exponent (crypto convention). Used by off-chain resolvers
+ * (`admin_resolve` path) to compute outcome without submitting a VAA update
+ * on-chain — avoids Pyth Move module format incompatibilities.
+ */
+export async function fetchPythPrice(
+  feedId: string,
+): Promise<{ price: bigint; publishTime: number }> {
+  const id = feedId.startsWith("0x") ? feedId.slice(2) : feedId;
+  const url = `${pythHermesUrl()}/v2/updates/price/latest?ids[]=${id}&encoding=base64`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(
+      `[aptos.ts] Pyth Hermes fetch failed: ${res.status} ${res.statusText} for feedId ${feedId}`,
+    );
+  }
+  const body = (await res.json()) as {
+    parsed?: Array<{ price?: { price?: string; publish_time?: number } }>;
+  };
+  const parsed = body.parsed?.[0]?.price;
+  if (!parsed?.price) {
+    throw new Error(`[aptos.ts] Pyth Hermes returned no parsed price for ${feedId}`);
+  }
+  const price = BigInt(parsed.price);
+  if (price <= 0n) {
+    throw new Error(`[aptos.ts] Pyth Hermes returned non-positive price ${parsed.price}`);
+  }
+  return { price, publishTime: parsed.publish_time ?? 0 };
+}
+
 export async function getPythVAA(feedId: string): Promise<Uint8Array> {
   const id = feedId.startsWith("0x") ? feedId.slice(2) : feedId;
-  const url = `${pythHermesUrl()}/api/latest_vaas?ids[]=${id}`;
+  // Use Pyth Hermes V2 accumulator endpoint (required for post-2024 Pyth
+  // on-chain Move module). Legacy `/api/latest_vaas` returns batch VAAs that
+  // abort on-chain with `0x1::table 0x6507` (feed lookup NOT_FOUND) because
+  // the stored format no longer matches.
+  const url = `${pythHermesUrl()}/v2/updates/price/latest?ids[]=${id}&encoding=base64`;
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(
@@ -739,41 +807,6 @@ export function buildResolveOracleTxn(
  * T4-11 — Admin builders (skeleton; Session E wires signing)
  * ------------------------------------------------------------------------ */
 
-export interface CreateMarketArgs {
-  groupId: bigint;
-  feedId: string; // hex, 0x-prefixed or not
-  strikePrice: bigint;
-  closeTime: bigint; // unix seconds
-  feeBps: number;
-  marketType: number;
-  thresholdType: number;
-  maxTradeBps: number;
-  maxStalenessSec: number;
-  poolDepth: bigint;
-}
-
-export function buildCreateMarketTxn(args: CreateMarketArgs): InputTransactionData {
-  const feedBytes = Array.from(fromHex(args.feedId));
-  return {
-    data: {
-      function: entryFn("market_factory", "create_market"),
-      typeArguments: [],
-      functionArguments: [
-        args.groupId.toString(),
-        feedBytes,
-        args.strikePrice.toString(),
-        args.closeTime.toString(),
-        args.feeBps,
-        args.marketType,
-        args.thresholdType,
-        args.maxTradeBps,
-        args.maxStalenessSec,
-        args.poolDepth.toString(),
-      ],
-    },
-  };
-}
-
 export function buildAdminResolveTxn(
   caseId: CaseId,
   outcome: OutcomeCode,
@@ -794,6 +827,22 @@ export function buildAdminPauseTxn(caseId: CaseId): InputTransactionData {
       function: entryFn("case_vault", "admin_pause"),
       typeArguments: [],
       functionArguments: [caseId.toString()],
+    },
+  };
+}
+
+/**
+ * `market_factory::clear_active_group(admin, group_id)` — removes the
+ * active-group table entry so a successor recurring case can spawn.
+ * `resolve_oracle` does NOT auto-clear; cron must invoke this after resolve.
+ */
+export function buildClearActiveGroupTxn(groupId: string): InputTransactionData {
+  const groupBytes = Array.from(new TextEncoder().encode(groupId));
+  return {
+    data: {
+      function: entryFn("market_factory", "clear_active_group"),
+      typeArguments: [],
+      functionArguments: [groupBytes],
     },
   };
 }
@@ -833,11 +882,9 @@ export function buildSpawnRecurring3minTxn(
  * admin_resolve, admin_pause). Private key loaded call-time from
  * APTOS_ADMIN_PRIVATE_KEY — never at module import, never logged, never
  * returned in responses. Rotation: generate new Ed25519 key via `aptos init`,
- * overwrite `.env` APTOS_ADMIN_PRIVATE_KEY, redeploy. Session D un-stubbed.
+ * overwrite `.env` APTOS_ADMIN_PRIVATE_KEY, redeploy.
  */
-export async function submitAdminTxn(
-  payload: InputTransactionData,
-): Promise<{ txnHash: string; success: boolean }> {
+async function loadAdminSigner() {
   const rawKey = process.env.APTOS_ADMIN_PRIVATE_KEY ?? "";
   if (rawKey.trim() === "" || rawKey.startsWith("0x_")) {
     throw new Error(
@@ -845,30 +892,115 @@ export async function submitAdminTxn(
         "Add the admin Ed25519 hex key to .env (gitignored) before invoking admin-signing paths.",
     );
   }
-
-  const {
-    Account,
-    Ed25519PrivateKey,
-    PrivateKey,
-    PrivateKeyVariants,
-  } = await import("@aptos-labs/ts-sdk");
-
+  const { Account, Ed25519PrivateKey, PrivateKey, PrivateKeyVariants } =
+    await import("@aptos-labs/ts-sdk");
   const hex = PrivateKey.formatPrivateKey(rawKey, PrivateKeyVariants.Ed25519);
-  const signer = Account.fromPrivateKey({
+  return Account.fromPrivateKey({
     privateKey: new Ed25519PrivateKey(hex),
   });
+}
 
+export async function submitAdminTxn(
+  payload: InputTransactionData,
+): Promise<{ txnHash: string; success: boolean }> {
+  const signer = await loadAdminSigner();
   const transaction = await aptos.transaction.build.simple({
     sender: signer.accountAddress,
     data: payload.data as InputEntryFunctionData,
+    options: { expireTimestamp: Math.floor(Date.now() / 1000) + 60 },
   });
-  const pending = await aptos.signAndSubmitTransaction({
-    signer,
-    transaction,
-  });
+  const pending = await aptos.signAndSubmitTransaction({ signer, transaction });
   const result = await aptos.waitForTransaction({
     transactionHash: pending.hash,
     options: { timeoutSecs: 30 },
   });
   return { txnHash: pending.hash, success: Boolean(result.success) };
+}
+
+/**
+ * Parallel admin tx batch. Fetches admin seq once, assigns monotonic
+ * `accountSequenceNumber` per payload, submits serially (fast — HTTP only),
+ * then awaits confirmations in parallel. On-chain executes strictly in seq
+ * order, so callers can rely on N-th payload having observed the (N-1)-th
+ * payload's state mutation.
+ *
+ * Per Aptos docs (see plan docs-synthesis): field name is
+ * `accountSequenceNumber`, NOT `sequenceNumber`. Type is AnyNumber.
+ */
+export type AdminTxnResult = {
+  txnHash: string | null;
+  success: boolean;
+  error?: string;
+};
+
+export async function submitAdminTxnsParallel(
+  payloads: InputTransactionData[],
+): Promise<AdminTxnResult[]> {
+  if (payloads.length === 0) return [];
+  if (payloads.length === 1) {
+    try {
+      const r = await submitAdminTxn(payloads[0]);
+      return [r];
+    } catch (err) {
+      return [{ txnHash: null, success: false, error: (err as Error).message }];
+    }
+  }
+
+  const signer = await loadAdminSigner();
+  const info = await aptos.getAccountInfo({
+    accountAddress: signer.accountAddress,
+  });
+  const baseSeq = BigInt(info.sequence_number);
+  const expireAt = Math.floor(Date.now() / 1000) + 60;
+
+  const txns = await Promise.all(
+    payloads.map((payload, i) =>
+      aptos.transaction.build.simple({
+        sender: signer.accountAddress,
+        data: payload.data as InputEntryFunctionData,
+        options: {
+          accountSequenceNumber: baseSeq + BigInt(i),
+          expireTimestamp: expireAt,
+        },
+      }),
+    ),
+  );
+
+  // Submit serially (fast HTTP) — avoids out-of-order fullnode submit
+  // behavior (Aptos docs silent on buffering). Wait phase is parallel.
+  const pending: Array<{ hash: string | null; error?: string }> = [];
+  for (const tx of txns) {
+    try {
+      const p = await aptos.signAndSubmitTransaction({ signer, transaction: tx });
+      pending.push({ hash: p.hash });
+    } catch (err) {
+      pending.push({ hash: null, error: (err as Error).message });
+    }
+  }
+
+  return Promise.all(
+    pending.map(async (p): Promise<AdminTxnResult> => {
+      if (p.hash === null) {
+        return { txnHash: null, success: false, error: p.error };
+      }
+      try {
+        const r = await aptos.waitForTransaction({
+          transactionHash: p.hash,
+          options: { timeoutSecs: 15, checkSuccess: false },
+        });
+        const success = Boolean(r.success);
+        if (!success) {
+          const vmStatus = (r as { vm_status?: string }).vm_status;
+          return {
+            txnHash: p.hash,
+            success: false,
+            error: vmStatus ? `tx aborted: ${vmStatus}` : "tx aborted (no vm_status)",
+          };
+        }
+        return { txnHash: p.hash, success: true };
+      } catch (err) {
+        return { txnHash: p.hash, success: false, error: (err as Error).message };
+      }
+    }),
+  );
 }

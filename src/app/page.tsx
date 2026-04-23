@@ -117,13 +117,6 @@ export default function LandingPage() {
         .hero-rings-svg g {
           will-change: transform;
         }
-        .hero-rings::after {
-          content: "";
-          position: absolute;
-          inset: 0;
-          background: linear-gradient(180deg, transparent 30%, rgba(2,2,2,0.35) 70%, rgba(2,2,2,0.55) 100%);
-          z-index: 1;
-        }
         @keyframes arc-travel-1 { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -4200; } }
         @keyframes arc-travel-2 { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -3600; } }
         @keyframes arc-travel-3 { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -3100; } }

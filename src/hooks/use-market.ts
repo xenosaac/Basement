@@ -3,20 +3,8 @@
 import { useQuery } from "@tanstack/react-query";
 import type { MarketWithPrices } from "@/types";
 
-type MarketDetail = MarketWithPrices & {
-  recentTrades: Array<{
-    id: string;
-    side: "YES" | "NO";
-    amountSpent: number;
-    sharesReceived: number;
-    priceAtTrade: number;
-    createdAt: string;
-    userAddress: string;
-  }>;
-};
-
 export function useMarket(id: string) {
-  return useQuery<MarketDetail>({
+  return useQuery<MarketWithPrices>({
     queryKey: ["market", id],
     queryFn: async () => {
       const res = await fetch(`/api/markets/${id}`);

@@ -162,12 +162,15 @@ describe("buildSponsoredTxn — allowlist + fee-payer flag", () => {
 });
 
 describe("getPythVAA — mocked fetch", () => {
-  it("returns Uint8Array from /api/latest_vaas array response", async () => {
+  it("returns Uint8Array from v2/updates accumulator response", async () => {
     setEnvHappy();
     const mod = await import("../aptos");
     const b64 = Buffer.from([1, 2, 3, 4, 5]).toString("base64");
     const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify([b64]), { status: 200 }),
+      new Response(
+        JSON.stringify({ binary: { encoding: "base64", data: [b64] }, parsed: [] }),
+        { status: 200 },
+      ),
     );
     vi.stubGlobal("fetch", fetchMock);
     const bytes = await mod.getPythVAA(
@@ -177,7 +180,7 @@ describe("getPythVAA — mocked fetch", () => {
     expect(Array.from(bytes)).toEqual([1, 2, 3, 4, 5]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const calledUrl = (fetchMock.mock.calls[0] as unknown[])[0] as string;
-    expect(calledUrl).toMatch(/\/api\/latest_vaas\?ids\[\]=e62d/);
+    expect(calledUrl).toMatch(/\/v2\/updates\/price\/latest\?ids\[\]=e62d/);
   });
 
   it("handles { binary: { data: [b64] } } envelope shape", async () => {
@@ -293,25 +296,6 @@ describe("admin builders — payload shape (no private key reads)", () => {
     expect(txn.data.functionArguments).toEqual(["99"]);
   });
 
-  it("buildCreateMarketTxn carries all market params", async () => {
-    setEnvHappy();
-    const mod = await import("../aptos");
-    const txn = mod.buildCreateMarketTxn({
-      groupId: 1n,
-      feedId: "0xcafe",
-      strikePrice: 500n,
-      closeTime: 999n,
-      feeBps: 30,
-      marketType: 0,
-      thresholdType: 1,
-      maxTradeBps: 100,
-      maxStalenessSec: 60,
-      poolDepth: 123n,
-    });
-    expect(txn.data.function).toBe("0xabc1::market_factory::create_market");
-    expect(txn.data.functionArguments.length).toBe(10);
-  });
-
   it("submitAdminTxn throws when APTOS_ADMIN_PRIVATE_KEY is unset", async () => {
     setEnvHappy();
     delete process.env.APTOS_ADMIN_PRIVATE_KEY;
@@ -373,6 +357,79 @@ describe("simulate helper — result shape", () => {
     // With 1000/1000 reserves and amountIn=100, expectedSharesOut ≈ 1000 - 1000*1000/1100 ≈ 90
     expect(result.expectedSharesOut > 0n).toBe(true);
     expect(result.priceImpactBps).toBeGreaterThan(0);
+  });
+});
+
+describe("simulateBuy — Move-aligned CPMM math (fee + reserve direction)", () => {
+  // Helper to build a fakeClient with given reserves + fee_bps.
+  function makeFakeClient(opts: {
+    yesReserve: string;
+    noReserve: string;
+    feeBps: number;
+  }) {
+    return {
+      view: vi.fn().mockResolvedValue(["0xvault"]),
+      getAccountResource: vi.fn().mockResolvedValue({
+        type: "0xabc1::case_vault::CaseVault",
+        data: {
+          yes_reserve: opts.yesReserve,
+          no_reserve: opts.noReserve,
+          state: 1,
+          resolved_outcome: 0,
+          admin_addr: "0xadm1",
+          close_time: "0",
+          fee_bps: opts.feeBps,
+          strike_price: "0",
+          market_type: 0,
+          threshold_type: 0,
+          max_trade_bps: 0,
+          max_staleness_sec: 0,
+          asset_pyth_feed_id: "0x00",
+        },
+      }),
+      transaction: {
+        build: { simple: vi.fn().mockResolvedValue({ rawTxn: true }) },
+        simulate: {
+          simple: vi.fn().mockResolvedValue([{ gas_used: "42" }]),
+        },
+      },
+    } as unknown as import("@aptos-labs/ts-sdk").Aptos;
+  }
+
+  it("fee_bps=300, asymmetric yes=1000/no=2000, buy_yes, amountIn=100 → 47", async () => {
+    setEnvHappy();
+    const mod = await import("../aptos");
+    const fakeClient = makeFakeClient({
+      yesReserve: "1000",
+      noReserve: "2000",
+      feeBps: 300,
+    });
+    const result = await mod.simulateBuyYes("0xuser", 1n, 100n, fakeClient);
+    expect(result.expectedSharesOut).toBe(47n);
+  });
+
+  it("fee_bps=300, symmetric flip yes=2000/no=1000, buy_no, amountIn=100 → 47", async () => {
+    setEnvHappy();
+    const mod = await import("../aptos");
+    const fakeClient = makeFakeClient({
+      yesReserve: "2000",
+      noReserve: "1000",
+      feeBps: 300,
+    });
+    const result = await mod.simulateBuyNo("0xuser", 1n, 100n, fakeClient);
+    expect(result.expectedSharesOut).toBe(47n);
+  });
+
+  it("fee_bps=0 control, yes=1000/no=1000, buy_yes, amountIn=100 → 91", async () => {
+    setEnvHappy();
+    const mod = await import("../aptos");
+    const fakeClient = makeFakeClient({
+      yesReserve: "1000",
+      noReserve: "1000",
+      feeBps: 0,
+    });
+    const result = await mod.simulateBuyYes("0xuser", 1n, 100n, fakeClient);
+    expect(result.expectedSharesOut).toBe(91n);
   });
 });
 

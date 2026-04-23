@@ -1,0 +1,41 @@
+"use client";
+
+import { useQuery } from "@tanstack/react-query";
+import { aptos, moduleAddress } from "@/lib/aptos";
+
+export function activeCaseQueryKey(groupId: string) {
+  return ["active-case", groupId] as const;
+}
+
+/**
+ * Read the currently-active case id for a recurring market group
+ * (e.g. "btc-3m", "eth-3m") via
+ * `${moduleAddress()}::market_factory::get_active_market_in_group`.
+ *
+ * IMPORTANT: the Move view expects the group id as `vector<u8>` — we pass
+ * `Array.from(new TextEncoder().encode(groupId))`, NOT a 0x-hex string. A
+ * recent bugfix regressed on the hex path; keep the byte-array encoding.
+ *
+ * Returns `null` when no active case exists for the group.
+ */
+export function useActiveCase(groupId: string | null) {
+  return useQuery({
+    queryKey: activeCaseQueryKey(groupId ?? ""),
+    enabled: Boolean(groupId),
+    staleTime: 30_000, // active case rotates every 3min — cheap to refetch
+    queryFn: async (): Promise<bigint | null> => {
+      if (!groupId) return null;
+      const groupBytes = Array.from(new TextEncoder().encode(groupId));
+      const res = (await aptos.view({
+        payload: {
+          function: `${moduleAddress()}::market_factory::get_active_market_in_group`,
+          typeArguments: [],
+          functionArguments: [groupBytes],
+        },
+      })) as [{ vec?: unknown[] }];
+      const vec = res[0]?.vec;
+      if (!Array.isArray(vec) || vec.length === 0) return null;
+      return BigInt(vec[0] as string);
+    },
+  });
+}

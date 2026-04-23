@@ -16,7 +16,6 @@ function pageNeedsWalletProvider(pathname: string | null) {
   return (
     pathname === "/markets" ||
     pathname.startsWith("/portfolio") ||
-    pathname.startsWith("/leaderboard") ||
     /^\/markets\/[^/]+/.test(pathname)
   );
 }

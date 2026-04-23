@@ -5,12 +5,8 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 
 import type { InputEntryFunctionData } from "@aptos-labs/ts-sdk";
-import {
-  aptos,
-  buildClaimFaucetTxn,
-} from "@/lib/aptos";
+import { aptos, buildClaimWinningsTxn } from "@/lib/aptos";
 import { portfolioOnChainQueryKey } from "./use-portfolio-onchain";
-import { FAUCET_AMOUNT } from "@/lib/constants";
 
 function bytesToHex(bytes: Uint8Array): string {
   let hex = "0x";
@@ -24,23 +20,24 @@ interface SponsorResponse {
   error?: string;
 }
 
-export function useFaucet() {
+export function useClaim(caseId: bigint | null) {
   const { account, signTransaction } = useWallet();
   const address = account?.address?.toString() ?? undefined;
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
 
   const { mutate: claim, isPending } = useMutation<
-    { txnHash: string; claimed: number },
+    { txnHash: string },
     Error
   >({
     mutationFn: async () => {
       if (!account) throw new Error("Connect your wallet first");
+      if (caseId === null) throw new Error("Missing caseId");
 
-      // Build the sponsored transaction. Must set `withFeePayer: true` so the
-      // wallet produces a sender authenticator that commits to the admin as
-      // fee payer.
-      const payload = buildClaimFaucetTxn();
+      // Build sponsored claim tx. claim_winnings is already in the
+      // SPONSORED_INNER_ENTRY_ALLOWLIST on the server, so we reuse
+      // /api/faucet/sponsor for submission.
+      const payload = buildClaimWinningsTxn(caseId);
       const rawTxn = await aptos.transaction.build.simple({
         sender: account.address,
         data: payload.data as InputEntryFunctionData,
@@ -50,9 +47,7 @@ export function useFaucet() {
         },
       });
 
-      // Fetch the canonical fee-payer address from the server — it's derived
-      // from the server-held faucet admin private key, so this can't drift
-      // from the signer even if env vars rotate independently.
+      // Fetch the canonical fee-payer address from the server.
       const feePayerRes = await fetch("/api/faucet/sponsor", { cache: "no-store" });
       const feePayerData = (await feePayerRes.json().catch(() => ({}))) as {
         feePayerAddress?: string;
@@ -72,7 +67,7 @@ export function useFaucet() {
 
       const transactionBytesHex = bytesToHex(rawTxn.bcsToBytes());
       const senderAuthenticatorBytesHex = bytesToHex(
-        senderAuth.authenticator.bcsToBytes()
+        senderAuth.authenticator.bcsToBytes(),
       );
 
       const res = await fetch("/api/faucet/sponsor", {
@@ -90,10 +85,10 @@ export function useFaucet() {
         throw new Error(data.error ?? `faucet/sponsor returned ${res.status}`);
       }
 
-      return { txnHash: data.txnHash, claimed: FAUCET_AMOUNT };
+      return { txnHash: data.txnHash };
     },
-    onSuccess: ({ claimed }) => {
-      setMessage(`+${claimed} VirtualUSD`);
+    onSuccess: () => {
+      setMessage("Claimed");
       queryClient.invalidateQueries({ queryKey: portfolioOnChainQueryKey(address) });
       queryClient.invalidateQueries({ queryKey: ["auth-session"] });
       setTimeout(() => setMessage(""), 3000);

@@ -51,6 +51,41 @@ function extractInnerEntryName(transaction: SimpleTransaction): string | null {
   return `basement::${moduleName}::${functionName}`;
 }
 
+// Canonical fee-payer address derived from the server-held faucet admin key.
+// Exposed so the client doesn't need to trust `NEXT_PUBLIC_ADMIN_ADDRESS` to
+// stay in sync with the private key — the wallet must set the correct
+// feePayerAddress on the sponsored tx or submission fails signature check.
+function loadFaucetAdmin():
+  | { account: Account; error?: undefined }
+  | { account?: undefined; error: string } {
+  const rawKey =
+    process.env.APTOS_FAUCET_ADMIN_PRIVATE_KEY ??
+    process.env.APTOS_ADMIN_PRIVATE_KEY ??
+    "";
+  if (rawKey.trim() === "" || rawKey.startsWith("0x_")) {
+    return { error: "APTOS_FAUCET_ADMIN_PRIVATE_KEY not configured" };
+  }
+  try {
+    const hex = PrivateKey.formatPrivateKey(rawKey, PrivateKeyVariants.Ed25519);
+    const account = Account.fromPrivateKey({
+      privateKey: new Ed25519PrivateKey(hex),
+    });
+    return { account };
+  } catch (err) {
+    return { error: `Invalid admin private key: ${(err as Error).message}` };
+  }
+}
+
+export async function GET(): Promise<Response> {
+  const loaded = loadFaucetAdmin();
+  if (!loaded.account) {
+    return NextResponse.json({ error: loaded.error }, { status: 500 });
+  }
+  return NextResponse.json({
+    feePayerAddress: loaded.account.accountAddress.toString(),
+  });
+}
+
 export async function POST(req: Request): Promise<Response> {
   // ── Rate limit ──────────────────────────────────────────
   const ip =

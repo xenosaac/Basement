@@ -1,51 +1,99 @@
 /**
- * Next.js instrumentation — runs once on server startup.
- * Sets up a background interval that calls /api/cron/resolve every 2 minutes
- * to auto-resolve expired markets and create new recurring rounds.
+ * Next.js instrumentation — runs once on server startup (dev + `next start`).
+ * Self-scheduling setTimeout chain: each tick calls resolve-onchain then
+ * spawn-recurring, reads the earliest upcoming `close_time` from the
+ * responses, and schedules the next tick to fire just after that moment.
  *
- * CRITICAL: must skip during build phase. `next build` also invokes register();
- * a lingering setInterval keeps the build process alive indefinitely, pegging CPU
- * as the interval retries fetch() against a non-existent server.
+ * Production Vercel serverless does not run long-lived timers — the
+ * `vercel.json` cron at every-minute schedule is the independent backstop.
+ *
+ * CRITICAL: must skip during build phase. `next build` also invokes register().
  */
 
-// Module-level guard — prevents double-register if Next invokes twice
 let cronRegistered = false;
 
+const STARTUP_DELAY_MS = 5_000;
+const FALLBACK_DELAY_MS = 60_000; // when nextCloseTime is null
+const ERROR_RETRY_MS = 30_000;    // when tick throws
+const MIN_DELAY_MS = 1_000;       // prevent busy loop
+const MAX_DELAY_MS = 3 * 60_000;  // 3min safety cap
+const POST_CLOSE_BUFFER_MS = 500;
+
+interface ResolveResp {
+  resolved?: unknown[];
+  skipped?: unknown[];
+  nextCloseTime?: number | null;
+}
+interface SpawnResp {
+  spawned?: unknown[];
+  skipped?: unknown[];
+  nextCloseTime?: number | null;
+}
+
 export async function register() {
-  // Only run in the Node.js server runtime
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
-
-  // Skip during build phase — setInterval would hold the build hostage
   if (process.env.NEXT_PHASE === "phase-production-build") return;
-
-  // Skip if already registered (belt-and-suspenders against double-invocation)
   if (cronRegistered) return;
   cronRegistered = true;
 
-  const INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
   const CRON_SECRET = process.env.CRON_SECRET ?? "";
   const PORT = process.env.PORT ?? "3000";
   const BASE_URL = `http://localhost:${PORT}`;
+  const auth = { Authorization: `Bearer ${CRON_SECRET}` };
 
-  // Wait for server to be ready before first call
-  setTimeout(async () => {
-    const tick = async () => {
-      try {
-        const res = await fetch(`${BASE_URL}/api/cron/resolve`, {
-          headers: { Authorization: `Bearer ${CRON_SECRET}` },
-        });
-        if (res.ok) {
-          const data = await res.json();
-          console.log(
-            `[cron] Auto-resolve: recurring=${data.recurring?.resolved ?? 0}/${data.recurring?.created ?? 0}`
-          );
-        }
-      } catch {
-        // Server not ready yet or network error — silent, will retry
+  const runOnce = async (): Promise<void> => {
+    let nextCloseTime: number | null = null;
+    try {
+      const r1 = await fetch(`${BASE_URL}/api/cron/resolve-onchain`, { headers: auth });
+      if (r1.ok) {
+        const d = (await r1.json()) as ResolveResp;
+        console.log(
+          `[cron] resolve-onchain: resolved=${d.resolved?.length ?? 0} skipped=${d.skipped?.length ?? 0}`
+        );
+        if (typeof d.nextCloseTime === "number") nextCloseTime = d.nextCloseTime;
       }
-    };
+    } catch {
+      /* server not ready / RPC hiccup — fall through to spawn */
+    }
 
-    await tick(); // First run
-    setInterval(tick, INTERVAL_MS); // Then every 2 minutes
-  }, 5000); // 5s delay for server startup
+    try {
+      const r2 = await fetch(`${BASE_URL}/api/cron/spawn-recurring`, { headers: auth });
+      if (r2.ok) {
+        const d = (await r2.json()) as SpawnResp;
+        console.log(
+          `[cron] spawn-recurring: spawned=${d.spawned?.length ?? 0} skipped=${d.skipped?.length ?? 0}`
+        );
+        // spawn runs after resolve; its nextCloseTime is more authoritative
+        if (typeof d.nextCloseTime === "number") nextCloseTime = d.nextCloseTime;
+      }
+    } catch {
+      /* ditto */
+    }
+
+    let delayMs: number;
+    if (nextCloseTime === null) {
+      delayMs = FALLBACK_DELAY_MS;
+    } else {
+      const nowMs = Date.now();
+      delayMs = nextCloseTime * 1000 - nowMs + POST_CLOSE_BUFFER_MS;
+    }
+    delayMs = Math.max(MIN_DELAY_MS, Math.min(MAX_DELAY_MS, delayMs));
+    console.log(
+      `[tick] next in ${Math.round(delayMs / 1000)}s${
+        nextCloseTime !== null ? ` (nextCloseTime=${nextCloseTime})` : " (fallback)"
+      }`
+    );
+    scheduleNextTick(delayMs);
+  };
+
+  const scheduleNextTick = (delayMs: number): void => {
+    setTimeout(() => {
+      runOnce().catch((err) => {
+        console.error(`[tick] error: ${(err as Error).message}; retrying in ${ERROR_RETRY_MS / 1000}s`);
+        scheduleNextTick(ERROR_RETRY_MS);
+      });
+    }, delayMs);
+  };
+
+  scheduleNextTick(STARTUP_DELAY_MS);
 }

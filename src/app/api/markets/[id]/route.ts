@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { markets, trades } from "@/db/schema";
-import { eq, desc } from "drizzle-orm";
+import { markets } from "@/db/schema";
+import { eq } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
@@ -19,22 +19,6 @@ export async function GET(
     if (!market) {
       return NextResponse.json({ error: "Market not found" }, { status: 404 });
     }
-
-    // Recent trades — uses index on (market_id, created_at)
-    const recentTrades = await db
-      .select({
-        id: trades.id,
-        side: trades.side,
-        amountSpent: trades.amountSpent,
-        sharesReceived: trades.sharesReceived,
-        priceAtTrade: trades.priceAtTrade,
-        createdAt: trades.createdAt,
-        userAddress: trades.userAddress,
-      })
-      .from(trades)
-      .where(eq(trades.marketId, id))
-      .orderBy(desc(trades.createdAt))
-      .limit(20);
 
     return NextResponse.json({
       id: market.id,
@@ -54,12 +38,6 @@ export async function GET(
       asset: market.asset,
       strikePrice: market.strikePrice ? Number(market.strikePrice) : null,
       recurringGroupId: market.recurringGroupId,
-      recentTrades: recentTrades.map((t) => ({
-        ...t,
-        amountSpent: Number(t.amountSpent),
-        sharesReceived: Number(t.sharesReceived),
-        priceAtTrade: Number(t.priceAtTrade),
-      })),
     });
   } catch (error) {
     console.error("Market detail error:", error);

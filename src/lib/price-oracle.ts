@@ -34,18 +34,7 @@ export function roundStrikePrice(price: number, asset: "BTC" | "ETH"): number {
   return Math.round(price / rounding) * rounding;
 }
 
-export function generateMarketQuestion(
-  asset: "BTC" | "ETH",
-  strikePrice: number,
-  closeTime: Date
-): string {
+export function generateMarketQuestion(asset: "BTC" | "ETH"): string {
   const name = asset === "BTC" ? "Bitcoin" : "Ethereum";
-  const timeStr = closeTime.toLocaleTimeString("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "UTC",
-  });
-  const formattedPrice = strikePrice.toLocaleString("en-US");
-  return `Will ${name} be above $${formattedPrice} at ${timeStr} UTC?`;
+  return `Will ${name} go up in the next 3 minutes?`;
 }

@@ -1,12 +1,12 @@
 {
   "crons": [
     {
-      "path": "/api/cron/resolve",
-      "schedule": "*/2 * * * *"
+      "path": "/api/cron/resolve-onchain",
+      "schedule": "*/1 * * * *"
     },
     {
       "path": "/api/cron/spawn-recurring",
-      "schedule": "*/2 * * * *"
+      "schedule": "*/1 * * * *"
     },
     {
       "path": "/api/cron/indexer",

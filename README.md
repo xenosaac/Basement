@@ -3,8 +3,6 @@
 **Non-custodial prediction markets on Aptos.**
 Your keys. Your positions. Your gas.
 
-→ [basement.trade](https://basement.trade)
-
 ---
 
 ## What it is

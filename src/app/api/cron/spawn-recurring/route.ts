@@ -10,32 +10,14 @@ import {
   buildSpawnRecurring3minTxn,
   getPythVAA,
   moduleAddress,
-  pythBtcFeedId,
-  pythEthFeedId,
-  submitAdminTxn,
+  readCaseState,
+  submitAdminTxnsParallel,
+  type InputTransactionData,
 } from "@/lib/aptos";
-
-interface GroupSpec {
-  groupId: string;
-  feedId: string;
-  tickSize: bigint;
-}
-
-// tick_size at Pyth 1e8 fixed-point: BTC = $500 => 500 * 1e8 = 5_0000_0000_0.
-// ETH = $25 => 25 * 1e8 = 25_0000_0000.
-const GROUPS: GroupSpec[] = [
-  { groupId: "btc-3m", feedId: "", tickSize: 50_000_000_000n },
-  { groupId: "eth-3m", feedId: "", tickSize: 2_500_000_000n },
-];
-
-const POOL_DEPTH_VUSD = 500_000_000n; // 500 vUSD at 6 decimals
-
-function utf8ToHex(s: string): string {
-  const bytes = new TextEncoder().encode(s);
-  let hex = "0x";
-  for (const b of bytes) hex += b.toString(16).padStart(2, "0");
-  return hex;
-}
+import {
+  activeGroupsByCadence,
+  pythFeedForGroup,
+} from "@/lib/market-groups";
 
 /**
  * Parse a Pyth Hermes VAA and extract the current price (signed i64 scaled
@@ -60,7 +42,16 @@ async function fetchCurrentPrice(feedId: string): Promise<bigint> {
   // (expo = -8), which is standard for crypto price feeds. We pass through
   // the raw integer and trust Pyth's canonical exponent per the on-chain
   // assertion in oracle.move.
-  return BigInt(priceStr);
+  const priceBig = BigInt(priceStr);
+  // Pyth returns a signed i64 — crypto feeds are always positive, but guard
+  // against edge cases so `buildSpawnRecurring3minTxn` doesn't BCS-fail on
+  // a negative u64 encode.
+  if (priceBig <= 0n) {
+    throw new Error(
+      `Pyth feed ${feedId} returned non-positive price ${priceStr}`,
+    );
+  }
+  return priceBig;
 }
 
 export const dynamic = "force-dynamic";
@@ -72,49 +63,108 @@ export async function GET(req: Request): Promise<Response> {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  // Fill feedIds from env (requires real testnet values from Session C).
-  const groups = GROUPS.map((g) => ({
-    ...g,
-    feedId: g.groupId.startsWith("btc") ? pythBtcFeedId() : pythEthFeedId(),
-  }));
+  // Registry-driven: every active `on-resolve` Pyth group spawns here.
+  // Adding a new pair (e.g. sol-3m) only requires editing market-groups.ts.
+  const groups = activeGroupsByCadence("on-resolve")
+    .filter((g) => g.resolutionKind === "pyth" && g.active)
+    .map((g) => ({ ...g, feedId: pythFeedForGroup(g) }));
+
+  type GroupPrep =
+    | { groupId: string; kind: "skip"; reason: string; nextCloseTime?: number }
+    | {
+        groupId: string;
+        kind: "ready";
+        payload: InputTransactionData;
+      };
+
+  // Parallel prep: view + price + VAA prefetch per group.
+  const preps: GroupPrep[] = await Promise.all(
+    groups.map(async (group): Promise<GroupPrep> => {
+      try {
+        const groupBytes = Array.from(new TextEncoder().encode(group.groupId));
+        const active = (await aptos.view({
+          payload: {
+            function: `${moduleAddress()}::market_factory::get_active_market_in_group`,
+            typeArguments: [],
+            functionArguments: [groupBytes],
+          },
+        })) as [{ vec?: unknown[] }];
+        const vec = active[0]?.vec;
+        if (Array.isArray(vec) && vec.length > 0) {
+          let nextCloseTime: number | undefined;
+          try {
+            const caseId = BigInt(vec[0] as string);
+            const state = await readCaseState(caseId);
+            nextCloseTime = Number(state.closeTime);
+          } catch {
+            /* best-effort */
+          }
+          return {
+            groupId: group.groupId,
+            kind: "skip",
+            reason: "active market exists",
+            nextCloseTime,
+          };
+        }
+
+        // Fetch current price + prefetch VAA in parallel (Pyth Hermes).
+        const [price] = await Promise.all([
+          fetchCurrentPrice(group.feedId),
+          getPythVAA(group.feedId).catch(() => undefined),
+        ]);
+
+        return {
+          groupId: group.groupId,
+          kind: "ready",
+          payload: buildSpawnRecurring3minTxn(
+            group.groupId,
+            group.feedId,
+            price,
+            group.tickSize,
+            group.poolDepth,
+          ),
+        };
+      } catch (err) {
+        return {
+          groupId: group.groupId,
+          kind: "skip",
+          reason: (err as Error).message,
+        };
+      }
+    }),
+  );
+
+  // Batch-submit all spawn payloads in one call.
+  const readyPreps = preps.filter(
+    (p): p is Extract<GroupPrep, { kind: "ready" }> => p.kind === "ready",
+  );
+  const results = await submitAdminTxnsParallel(
+    readyPreps.map((p) => p.payload),
+  );
 
   const spawned: Array<{ group: string; txnHash: string }> = [];
   const skipped: Array<{ group: string; reason: string }> = [];
+  const closeTimes: number[] = [];
 
-  for (const group of groups) {
-    try {
-      // Peek the on-chain active-group table. If occupied, skip.
-      const active = (await aptos.view({
-        payload: {
-          function: `${moduleAddress()}::market_factory::get_active_market_in_group`,
-          typeArguments: [],
-          functionArguments: [utf8ToHex(group.groupId)],
-        },
-      })) as [{ vec?: unknown[] }];
-      const vec = active[0]?.vec;
-      if (Array.isArray(vec) && vec.length > 0) {
-        skipped.push({ group: group.groupId, reason: "active market exists" });
-        continue;
-      }
-
-      const price = await fetchCurrentPrice(group.feedId);
-      // Prefetch VAA into cache (not strictly required for spawn — only resolve
-      // needs VAA — but fetching confirms Hermes is alive this cycle).
-      await getPythVAA(group.feedId).catch(() => undefined);
-
-      const payload = buildSpawnRecurring3minTxn(
-        group.groupId,
-        group.feedId,
-        price,
-        group.tickSize,
-        POOL_DEPTH_VUSD,
-      );
-      const { txnHash } = await submitAdminTxn(payload);
-      spawned.push({ group: group.groupId, txnHash });
-    } catch (err) {
-      skipped.push({ group: group.groupId, reason: (err as Error).message });
+  for (const p of preps) {
+    if (p.kind === "skip") {
+      skipped.push({ group: p.groupId, reason: p.reason });
+      if (typeof p.nextCloseTime === "number") closeTimes.push(p.nextCloseTime);
     }
   }
+  readyPreps.forEach((p, i) => {
+    const r = results[i];
+    if (r.success && r.txnHash) {
+      spawned.push({ group: p.groupId, txnHash: r.txnHash });
+      closeTimes.push(Math.floor(Date.now() / 1000) + 180);
+    } else {
+      skipped.push({
+        group: p.groupId,
+        reason: r.error ?? "spawn tx failed",
+      });
+    }
+  });
 
-  return NextResponse.json({ spawned, skipped });
+  const nextCloseTime = closeTimes.length ? Math.min(...closeTimes) : null;
+  return NextResponse.json({ spawned, skipped, nextCloseTime });
 }

@@ -65,8 +65,6 @@ const bytea = customType<{ data: Uint8Array; notNull: false; default: false }>({
 
 export const users = pgTable("users", {
   address: text("address").primaryKey(), // wallet address, lowercase
-  balance: numeric("balance", { precision: 20, scale: 6 }).notNull().default("0"),
-  faucetClaimedAt: timestamp("faucet_claimed_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -182,76 +180,10 @@ export const vaultIndexerCursor = pgTable("vault_indexer_cursor", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-// ─── Positions ───────────────────────────────────────────
-
-export const positions = pgTable(
-  "positions",
-  {
-    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
-    userAddress: text("user_address").notNull().references(() => users.address),
-    marketId: text("market_id").notNull().references(() => markets.id),
-    side: sideEnum("side").notNull(),
-    amountSpent: numeric("amount_spent", { precision: 20, scale: 6 }).notNull().default("0"),
-    sharesReceived: numeric("shares_received", { precision: 20, scale: 6 }).notNull().default("0"),
-    avgPrice: numeric("avg_price", { precision: 10, scale: 6 }).notNull().default("0"),
-    createdAt: timestamp("created_at").notNull().defaultNow(),
-    updatedAt: timestamp("updated_at").notNull().defaultNow(),
-    sourceEventId: uuid("source_event_id").references(() => vaultEvents.id),
-  },
-  (t) => [
-    unique("positions_user_market_side_uniq").on(t.userAddress, t.marketId, t.side),
-    index("positions_user_idx").on(t.userAddress),
-    index("positions_market_idx").on(t.marketId),
-  ]
-);
-
-// ─── Trades (append-only log) ────────────────────────────
-
-export const trades = pgTable(
-  "trades",
-  {
-    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
-    userAddress: text("user_address").notNull().references(() => users.address),
-    marketId: text("market_id").notNull().references(() => markets.id),
-    side: sideEnum("side").notNull(),
-    amountSpent: numeric("amount_spent", { precision: 20, scale: 6 }).notNull(),
-    sharesReceived: numeric("shares_received", { precision: 20, scale: 6 }).notNull(),
-    priceAtTrade: numeric("price_at_trade", { precision: 10, scale: 6 }).notNull(),
-    createdAt: timestamp("created_at").notNull().defaultNow(),
-    sourceEventId: uuid("source_event_id").references(() => vaultEvents.id),
-  },
-  (t) => [
-    index("trades_market_idx").on(t.marketId),
-    index("trades_user_idx").on(t.userAddress),
-    index("trades_market_created_idx").on(t.marketId, t.createdAt),
-  ]
-);
-
-// ─── Claims ──────────────────────────────────────────────
-
-export const claims = pgTable(
-  "claims",
-  {
-    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
-    userAddress: text("user_address").notNull().references(() => users.address),
-    marketId: text("market_id").notNull().references(() => markets.id),
-    payout: numeric("payout", { precision: 20, scale: 6 }).notNull(),
-    claimedAt: timestamp("claimed_at").notNull().defaultNow(),
-    sourceEventId: uuid("source_event_id").references(() => vaultEvents.id),
-  },
-  (t) => [
-    unique("claims_user_market_uniq").on(t.userAddress, t.marketId),
-    index("claims_user_idx").on(t.userAddress),
-  ]
-);
-
 // ─── Types ───────────────────────────────────────────────
 
 export type User = typeof users.$inferSelect;
 export type Market = typeof markets.$inferSelect;
-export type Position = typeof positions.$inferSelect;
-export type Trade = typeof trades.$inferSelect;
-export type Claim = typeof claims.$inferSelect;
 export type NewMarket = typeof markets.$inferInsert;
 export type AuthNonce = typeof authNonces.$inferSelect;
 export type NewAuthNonce = typeof authNonces.$inferInsert;

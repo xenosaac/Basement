@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { markets } from "@/db/schema";
 import { calculatePrices } from "@/lib/amm";
 import { RECURRING_DURATION_MINUTES } from "@/lib/constants";
+import { activePythGroups } from "@/lib/market-groups";
 import {
   fetchCryptoPrices,
   generateMarketQuestion,
@@ -11,10 +12,14 @@ import {
 import type { MarketsResponse } from "@/types";
 
 const VALID_STATES: readonly string[] = ["OPEN", "CLOSED", "RESOLVED", "SETTLED"];
-const RECURRING_GROUPS: { groupId: string; asset: "BTC" | "ETH" }[] = [
-  { groupId: "btc-15m", asset: "BTC" },
-  { groupId: "eth-15m", asset: "ETH" },
-];
+// Registry-driven. Previously hardcoded to "btc-15m"/"eth-15m" (stale ids
+// predating the 3-min cadence) — the registry now keeps these in lockstep
+// with the on-chain cron routes.
+const RECURRING_GROUPS: { groupId: string; asset: "BTC" | "ETH" }[] =
+  activePythGroups().map((g) => ({
+    groupId: g.groupId,
+    asset: g.assetSymbol as "BTC" | "ETH",
+  }));
 const FALLBACK_PRICES = { btc: 85000, eth: 2000 };
 const RECURRING_ENSURE_COOLDOWN_MS = 30_000;
 
@@ -77,20 +82,20 @@ async function ensureActiveRecurringMarkets(): Promise<void> {
           currentPrice = asset === "BTC" ? FALLBACK_PRICES.btc : FALLBACK_PRICES.eth;
         }
 
-        const strike = roundStrikePrice(currentPrice, asset);
+        const openPrice = roundStrikePrice(currentPrice, asset);
         const closeTime = new Date(now.getTime() + RECURRING_DURATION_MINUTES * 60 * 1000);
-        const question = generateMarketQuestion(asset, strike, closeTime);
+        const question = generateMarketQuestion(asset);
         const initialPrices = calculatePrices(1, 1);
         const assetName = asset === "BTC" ? "Bitcoin" : "Ethereum";
 
         await db.insert(markets).values({
           slug: `recurring-${groupId}-${now.getTime()}`,
           question,
-          description: `Resolves YES if ${assetName} price is at or above $${strike.toLocaleString("en-US")} at close time. Price sourced from CoinGecko.`,
+          description: `Resolves YES if ${assetName} price at close is higher than at open. Price sourced from Pyth.`,
           state: "OPEN",
           marketType: "RECURRING",
           asset,
-          strikePrice: String(strike),
+          strikePrice: String(openPrice),
           recurringGroupId: groupId,
           yesDemand: "1",
           noDemand: "1",

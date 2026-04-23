@@ -3,6 +3,7 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import { useMarkets } from "@/hooks/use-markets";
 import { MarketCard } from "./market-card";
+import { isActiveRecurringGroupId } from "@/lib/market-groups";
 import type { MarketsResponse, MarketWithPrices } from "@/types";
 
 const CATEGORIES = [
@@ -55,7 +56,12 @@ export function MarketGrid({ initialData }: { initialData?: MarketsResponse }) {
 
     for (const market of allMarkets) {
       if (market.marketType === "RECURRING") {
-        if (market.state === "OPEN") recurringMarkets.push(market);
+        if (
+          market.state === "OPEN" &&
+          isActiveRecurringGroupId(market.recurringGroupId)
+        ) {
+          recurringMarkets.push(market);
+        }
         continue;
       }
 

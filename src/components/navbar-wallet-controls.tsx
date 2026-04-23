@@ -6,7 +6,7 @@ import { createPortal } from "react-dom";
 import type { AdapterWallet, AdapterNotDetectedWallet } from "@aptos-labs/wallet-adapter-react";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { useAptosAuth } from "./aptos-auth-provider";
-import { usePortfolio } from "@/hooks/use-portfolio";
+import { usePortfolioOnChain } from "@/hooks/use-portfolio-onchain";
 import { formatUSD } from "@/lib/utils";
 
 function truncateAddress(address: string): string {
@@ -233,12 +233,11 @@ export function NavbarWalletControls() {
   const { connected, account, wallet, disconnect } = useWallet();
   const { isAuthenticated, isAuthenticating, authError, signIn } =
     useAptosAuth();
-  const { data: portfolio } = usePortfolio();
+  const { data: portfolio } = usePortfolioOnChain();
   const [dialogOpen, setDialogOpen] = useState(false);
 
   const addressStr = account?.address.toString();
-  // TEMPORARY: reads v0 DB balance; Session D rewires to on-chain FA.
-  const balance = portfolio?.balance ?? 0;
+  const balance = Number(portfolio?.balance ?? 0n) / 1_000_000;
 
   return (
     <>
@@ -304,8 +303,8 @@ export function NavbarMobileWalletItems({
 }) {
   const { connected } = useWallet();
   const { isAuthenticated } = useAptosAuth();
-  const { data: portfolio } = usePortfolio();
-  const balance = portfolio?.balance ?? 0;
+  const { data: portfolio } = usePortfolioOnChain();
+  const balance = Number(portfolio?.balance ?? 0n) / 1_000_000;
 
   return (
     <>
@@ -320,8 +319,8 @@ export function NavbarMobileWalletItems({
       )}
       {connected && isAuthenticated && (
         <div className="text-sm py-2">
-          <span className="text-white/40">Balance: </span>
-          <span className="text-accent font-medium">{formatUSD(balance)}</span>
+          <span className="text-white/40">Balance </span>
+          <span className="text-white font-medium">${formatUSD(balance)}</span>
         </div>
       )}
     </>

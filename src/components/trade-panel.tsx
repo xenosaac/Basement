@@ -4,22 +4,31 @@ import "@/lib/ensure-server-localstorage";
 import { useState, useCallback } from "react";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { useTrade } from "@/hooks/use-trade";
-import { usePortfolio } from "@/hooks/use-portfolio";
+import { usePortfolioOnChain } from "@/hooks/use-portfolio-onchain";
+import { useActiveCase } from "@/hooks/use-active-case";
 import { calculateTradeQuote, calculateSellQuote } from "@/lib/amm";
 import { formatUSD, formatPercent } from "@/lib/utils";
 import { useAptosAuth } from "./aptos-auth-provider";
 import { NavbarWalletControls } from "./navbar-wallet-controls";
 import { Toast } from "./toast";
 
+/** Truncate a 0x... hash for toast display. */
+function truncateHash(hash: string): string {
+  if (!hash) return "";
+  if (hash.length <= 14) return hash;
+  return `${hash.slice(0, 8)}…${hash.slice(-4)}`;
+}
+
 export function TradePanel({
-  marketId,
+  recurringGroupId,
   yesDemand,
   noDemand,
   yesPrice,
   noPrice,
   state,
 }: {
-  marketId: string;
+  /** Recurring group id (e.g. "btc-3m") — drives active-case lookup. */
+  recurringGroupId: string | null;
   yesDemand: number;
   noDemand: number;
   yesPrice: number;
@@ -27,9 +36,14 @@ export function TradePanel({
   state: string;
 }) {
   const { connected: isConnected } = useWallet();
-  const trade = useTrade(marketId);
   const { isAuthenticated, isAuthenticating, authError, signIn } = useAptosAuth();
-  const { data: portfolio } = usePortfolio();
+  const { data: portfolio } = usePortfolioOnChain();
+  const {
+    data: activeCaseId,
+    isLoading: isActiveCaseLoading,
+  } = useActiveCase(recurringGroupId);
+  const trade = useTrade(recurringGroupId);
+
   const [direction, setDirection] = useState<"BUY" | "SELL">("BUY");
   const [side, setSide] = useState<"YES" | "NO">("YES");
   const [amount, setAmount] = useState("");
@@ -38,16 +52,18 @@ export function TradePanel({
 
   const isSell = direction === "SELL";
   const numAmount = parseFloat(amount) || 0;
-  // TEMPORARY: reads v0 DB balance via /api/portfolio. Session D will rewire
-  // this to read on-chain VirtualUSD FA balance via src/lib/aptos.ts.
-  const balance = portfolio?.balance ?? 0;
+
+  // On-chain vUSD balance: bigint raw (1e6) → float for UI math.
+  const balance = Number(portfolio?.balance ?? 0n) / 1e6;
   const isOpen = state === "OPEN";
 
-  // Find current position for sell mode
+  // Find position for the active on-chain case matching current side.
   const currentPosition = portfolio?.positions?.find(
-    (p) => p.marketId === marketId && p.side === side
+    (p) => activeCaseId != null && p.caseId === activeCaseId.toString(),
   );
-  const sharesOwned = currentPosition ? Number(currentPosition.sharesReceived) : 0;
+  const sharesOwned = currentPosition
+    ? Number(side === "YES" ? currentPosition.yesShares : currentPosition.noShares) / 1e6
+    : 0;
 
   const preview = numAmount > 0
     ? isSell
@@ -56,20 +72,21 @@ export function TradePanel({
     : null;
 
   const handleTrade = () => {
+    if (activeCaseId == null) return;
     if (isSell) {
       if (numAmount <= 0 || numAmount > sharesOwned) return;
     } else {
       if (numAmount <= 0 || numAmount > balance) return;
     }
     trade.mutate(
-      { side, amount: numAmount, direction },
+      { caseId: activeCaseId, side, direction, amount: numAmount },
       {
         onSuccess: (data) => {
-          if (isSell) {
-            setToast({ message: `Sold ${numAmount.toFixed(2)} ${side} shares for ${formatUSD(Math.abs(data.amountSpent))}`, type: "success" });
-          } else {
-            setToast({ message: `Bought ${data.sharesReceived.toFixed(2)} ${side} shares @ ${formatPercent(data.priceAtTrade)}`, type: "success" });
-          }
+          const verb = data.direction === "BUY" ? "Bought" : "Sold";
+          setToast({
+            message: `${verb} ${numAmount.toFixed(2)} ${data.side} · tx ${truncateHash(data.txnHash)}`,
+            type: "success",
+          });
           setAmount("");
         },
         onError: (err) => {
@@ -121,6 +138,22 @@ export function TradePanel({
         >
           {isAuthenticating ? "Signing..." : "Sign In to Trade"}
         </button>
+      </div>
+    );
+  }
+
+  if (isActiveCaseLoading) {
+    return (
+      <div className="glass rounded-lg p-6">
+        <p className="text-center text-white/40 text-sm">Loading active case...</p>
+      </div>
+    );
+  }
+
+  if (activeCaseId == null) {
+    return (
+      <div className="glass rounded-lg p-6">
+        <p className="text-center text-white/40 text-sm">Market not active on-chain</p>
       </div>
     );
   }

@@ -2,15 +2,18 @@
 
 import { useParams } from "next/navigation";
 import { useMarket } from "@/hooks/use-market";
-import { usePortfolio } from "@/hooks/use-portfolio";
+import { usePortfolioOnChain } from "@/hooks/use-portfolio-onchain";
+import { useActiveCase } from "@/hooks/use-active-case";
 import { TradePanel } from "@/components/trade-panel";
-import { PositionCard } from "@/components/position-card";
-import { formatUSD, formatPercent, shortenAddress, timeRemaining } from "@/lib/utils";
+import { formatUSD, formatPercent, timeRemaining } from "@/lib/utils";
 
 export default function MarketPage() {
   const { id } = useParams<{ id: string }>();
   const { data: market, isLoading } = useMarket(id);
-  const { data: portfolio } = usePortfolio();
+  const { data: portfolio } = usePortfolioOnChain();
+  // Active on-chain case id for this market's recurring group (drives
+  // "Your Positions" filter + TradePanel). Phase B will add claim button.
+  const { data: activeCaseId } = useActiveCase(market?.recurringGroupId ?? null);
 
   if (isLoading) {
     return (
@@ -29,7 +32,11 @@ export default function MarketPage() {
     return <div className="text-center py-20 text-white/40">Market not found.</div>;
   }
 
-  const myPositions = portfolio?.positions.filter((p) => p.marketId === id) ?? [];
+  // On-chain positions for the currently-active case in this group.
+  // TODO(phase-b): add a claim button here for resolved cases.
+  const myPositions = (portfolio?.positions ?? []).filter(
+    (p) => activeCaseId != null && p.caseId === activeCaseId.toString(),
+  );
   const isLive = market.state === "OPEN";
 
   return (
@@ -89,56 +96,41 @@ export default function MarketPage() {
             </div>
           </div>
 
-          {/* Positions */}
+          {/* Positions — on-chain shares (Phase A). Claim button lives in Phase B. */}
           {myPositions.length > 0 && (
             <div>
               <h2 className="text-xs text-white/35 uppercase tracking-wider mb-3">Your Positions</h2>
               <div className="space-y-2">
-                {myPositions.map((pos) => (
-                  <PositionCard key={pos.id} position={pos} />
-                ))}
+                {myPositions.map((pos) => {
+                  const yes = Number(pos.yesShares) / 1e6;
+                  const no = Number(pos.noShares) / 1e6;
+                  return (
+                    <div key={pos.caseId} className="space-y-2">
+                      {yes > 0 && (
+                        <div className="glass rounded-lg px-4 py-3 flex items-center justify-between">
+                          <span className="text-xs font-semibold uppercase tracking-wider text-yes">Yes</span>
+                          <span className="text-sm text-white/70 font-mono">{yes.toFixed(2)} shares</span>
+                        </div>
+                      )}
+                      {no > 0 && (
+                        <div className="glass rounded-lg px-4 py-3 flex items-center justify-between">
+                          <span className="text-xs font-semibold uppercase tracking-wider text-no">No</span>
+                          <span className="text-sm text-white/70 font-mono">{no.toFixed(2)} shares</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
 
-          {/* Recent trades */}
-          {market.recentTrades && market.recentTrades.length > 0 && (
-            <div>
-              <h2 className="text-xs text-white/35 uppercase tracking-wider mb-3">Recent Activity</h2>
-              <div className="glass rounded-lg overflow-x-auto">
-                <table className="w-full text-xs min-w-[480px] sm:min-w-0">
-                  <thead>
-                    <tr className="border-b border-glass-border text-white/30">
-                      <th className="text-left px-4 py-2.5 font-medium">Side</th>
-                      <th className="text-right px-4 py-2.5 font-medium">Amount</th>
-                      <th className="text-right px-4 py-2.5 font-medium">Shares</th>
-                      <th className="text-right px-4 py-2.5 font-medium">Price</th>
-                      <th className="text-right px-4 py-2.5 font-medium hidden sm:table-cell">Trader</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {market.recentTrades.map((t) => (
-                      <tr key={t.id} className="border-b border-glass-border/50 last:border-0">
-                        <td className="px-4 py-2.5">
-                          <span className={t.side === "YES" ? "text-yes" : "text-no"}>{t.side}</span>
-                        </td>
-                        <td className="text-right px-4 py-2.5 text-white/60">{formatUSD(t.amountSpent)}</td>
-                        <td className="text-right px-4 py-2.5 text-white/60">{t.sharesReceived.toFixed(1)}</td>
-                        <td className="text-right px-4 py-2.5 text-white/60">{formatPercent(t.priceAtTrade)}</td>
-                        <td className="text-right px-4 py-2.5 text-white/30 hidden sm:table-cell">{shortenAddress(t.userAddress)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Right: Trade panel */}
         <div>
           <TradePanel
-            marketId={market.id}
+            recurringGroupId={market.recurringGroupId ?? null}
             yesDemand={market.yesDemand}
             noDemand={market.noDemand}
             yesPrice={market.yesPrice}
