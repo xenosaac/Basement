@@ -5,6 +5,7 @@ import { calculatePrices } from "@/lib/amm";
 import { fetchPythPrice } from "@/lib/aptos";
 import {
   activePythGroups,
+  isActiveRecurringGroupId,
   pythFeedForGroup,
   type MarketGroupSpec,
 } from "@/lib/market-groups";
@@ -210,8 +211,19 @@ export async function getMarketsList(params: MarketsQueryParams = {}): Promise<M
     db.select({ total: count() }).from(markets).where(where),
   ]);
 
+  // Drop recurring rows whose group id is no longer in the active registry
+  // (e.g. legacy btc-15m / eth-15m from pre-3m cadence). Those rows may
+  // linger in the DB with state=OPEN; the UI market-grid already hides
+  // them client-side, but the API should return a clean view too.
+  const cleanRows = rows.filter(
+    (r) =>
+      r.marketType !== "RECURRING" ||
+      !r.recurringGroupId ||
+      isActiveRecurringGroupId(r.recurringGroupId),
+  );
+
   return {
-    markets: rows.map((market) => ({
+    markets: cleanRows.map((market) => ({
       ...market,
       yesPrice: Number(market.yesPrice),
       noPrice: Number(market.noPrice),
@@ -221,7 +233,7 @@ export async function getMarketsList(params: MarketsQueryParams = {}): Promise<M
       strikePrice: market.strikePrice ? Number(market.strikePrice) : null,
       closeTime: market.closeTime?.toISOString() ?? null,
     })),
-    total,
+    total: cleanRows.length === rows.length ? total : cleanRows.length,
     limit: limitParam,
     offset: offsetParam,
   };
