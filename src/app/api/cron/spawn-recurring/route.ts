@@ -17,6 +17,7 @@ import {
 } from "@/lib/aptos";
 import {
   activeGroupsByCadence,
+  isMarketOpen,
   pythFeedForGroup,
 } from "@/lib/market-groups";
 
@@ -81,10 +82,21 @@ export async function GET(req: Request): Promise<Response> {
         payload: InputTransactionData;
       };
 
+  const nowUtcSec = Math.floor(Date.now() / 1000);
+
   // Parallel prep: view + price + VAA prefetch per group.
   const preps: GroupPrep[] = await Promise.all(
     groups.map(async (group): Promise<GroupPrep> => {
       try {
+        // Commodity / stocks gate: skip spawning outside market hours so
+        // new cases don't spend their lifetime on a stale frozen price.
+        if (!isMarketOpen(group, nowUtcSec)) {
+          return {
+            groupId: group.groupId,
+            kind: "skip",
+            reason: `market closed (${group.category})`,
+          };
+        }
         const groupBytes = Array.from(new TextEncoder().encode(group.groupId));
         const active = (await aptos.view({
           payload: {

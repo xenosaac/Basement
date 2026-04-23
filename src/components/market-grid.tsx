@@ -7,6 +7,7 @@ import {
   isActiveRecurringGroupId,
   categoryForRecurringGroupId,
   sortNameForRecurringGroupId,
+  MARKET_GROUPS,
   type Category,
 } from "@/lib/market-groups";
 import type { MarketsResponse, MarketWithPrices } from "@/types";
@@ -27,6 +28,11 @@ const COMING_SOON_TABS: ReadonlySet<TabValue> = new Set<TabValue>([
   "stocks",
   "others",
 ]);
+
+// Quick Play strip is specifically for short-duration ("3-MIN ROUNDS") markets.
+// Longer-cadence recurring groups (xau-1h, future daily/weekly) appear only in
+// their category tab so the Quick Play header stays truthful.
+const QUICK_PLAY_MAX_DURATION_SEC = 600; // 10 min — generous for future 5m groups
 
 function compareBySortName(a: MarketWithPrices, b: MarketWithPrices): number {
   const sa = sortNameForRecurringGroupId(a.recurringGroupId) ?? a.question;
@@ -84,11 +90,17 @@ export function MarketGrid({ initialData }: { initialData?: MarketsResponse }) {
         continue;
       }
 
-      // Quick Play strip surfaces active recurring markets at the top.
-      // Duplication with the category tabs is intentional — Quick Play is
-      // a featured strip, tabs are the catalog.
+      // Quick Play strip surfaces only SHORT-duration recurring markets
+      // (3-min BTC/ETH today). Longer cadences like xau-1h still appear in
+      // their category tab but not in the Quick Play header, so the
+      // "3-MIN ROUNDS" copy stays truthful. Duplication between Quick Play
+      // and the Crypto tab is intentional — Quick Play is a featured strip.
       if (market.marketType === "RECURRING") {
-        recurringMarkets.push(market);
+        const durationSec =
+          MARKET_GROUPS[market.recurringGroupId ?? ""]?.durationSec ?? 0;
+        if (durationSec > 0 && durationSec <= QUICK_PLAY_MAX_DURATION_SEC) {
+          recurringMarkets.push(market);
+        }
       }
 
       byCategory.all.push(market);

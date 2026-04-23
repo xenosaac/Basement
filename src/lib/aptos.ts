@@ -184,6 +184,15 @@ export function pythEthFeedId(): string {
     process.env.NEXT_PUBLIC_PYTH_ETH_FEED_ID,
   );
 }
+// NOTE: Pyth XAU/USD gold-spot feed — beta on Aptos testnet, stable on mainnet.
+// Channel must match PYTH_HERMES_URL (see env file docs).
+export function pythXauFeedId(): string {
+  return pickStatic(
+    "PYTH_XAU_FEED_ID (or NEXT_PUBLIC_PYTH_XAU_FEED_ID)",
+    process.env.PYTH_XAU_FEED_ID,
+    process.env.NEXT_PUBLIC_PYTH_XAU_FEED_ID,
+  );
+}
 
 /* ---------------------------------------------------------------------------
  * T4-03 — Types
@@ -766,7 +775,7 @@ export function buildSponsoredTxn(input: BuildSponsoredInput): SponsoredTxnOutpu
  */
 export async function fetchPythPrice(
   feedId: string,
-): Promise<{ price: bigint; publishTime: number }> {
+): Promise<{ price: bigint; publishTime: number; expo: number }> {
   const id = feedId.startsWith("0x") ? feedId.slice(2) : feedId;
   const url = `${pythHermesUrl()}/v2/updates/price/latest?ids[]=${id}&encoding=base64`;
   const res = await fetch(url);
@@ -776,7 +785,9 @@ export async function fetchPythPrice(
     );
   }
   const body = (await res.json()) as {
-    parsed?: Array<{ price?: { price?: string; publish_time?: number } }>;
+    parsed?: Array<{
+      price?: { price?: string; publish_time?: number; expo?: number };
+    }>;
   };
   const parsed = body.parsed?.[0]?.price;
   if (!parsed?.price) {
@@ -786,7 +797,13 @@ export async function fetchPythPrice(
   if (price <= 0n) {
     throw new Error(`[aptos.ts] Pyth Hermes returned non-positive price ${parsed.price}`);
   }
-  return { price, publishTime: parsed.publish_time ?? 0 };
+  // expo is typically -8 for crypto spot, -3 for XAU spot; caller must use it
+  // to produce a human-readable decimal (rawPrice * 10^expo).
+  return {
+    price,
+    publishTime: parsed.publish_time ?? 0,
+    expo: parsed.expo ?? -8,
+  };
 }
 
 export async function getPythVAA(feedId: string): Promise<Uint8Array> {

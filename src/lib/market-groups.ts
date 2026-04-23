@@ -11,7 +11,7 @@
  * Pyth feed-id getters). Feed ids are resolved via {@link pythFeedForGroup} at
  * call-time so module import stays side-effect-free.
  */
-import { pythBtcFeedId, pythEthFeedId } from "./aptos";
+import { pythBtcFeedId, pythEthFeedId, pythXauFeedId } from "./aptos";
 
 export type ResolutionKind = "pyth" | "switchboard" | "supra" | "manual" | "ucrt";
 export type SpawnCadence =
@@ -80,6 +80,21 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     questionTemplate: "Will Ethereum go up in the next 3 minutes?",
     active: true,
   },
+  "xau-1h": {
+    groupId: "xau-1h",
+    assetSymbol: "XAU",
+    category: "commodity",
+    sortName: "XAU",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    // Directional 1-hour: YES if close > open. Same tickSize=1 trick as BTC-3m.
+    durationSec: 3600,
+    tickSize: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    questionTemplate: "Will Gold go up in the next hour?",
+    active: true,
+  },
 };
 
 /** Set of active recurring group ids. Used by UI filters to exclude
@@ -145,7 +160,41 @@ export function pythFeedForGroup(spec: MarketGroupSpec): string {
   }
   if (spec.assetSymbol === "BTC") return pythBtcFeedId();
   if (spec.assetSymbol === "ETH") return pythEthFeedId();
+  if (spec.assetSymbol === "XAU") return pythXauFeedId();
   throw new Error(`no pyth feed for asset ${spec.assetSymbol}`);
+}
+
+/**
+ * Returns true when a given market group is tradeable RIGHT NOW.
+ *
+ * - **Crypto** markets trade 24/7.
+ * - **Commodity** (currently XAU gold): Sun 22:00 UTC → Fri 21:00 UTC. Matches
+ *   the LBMA + COMEX overlap window. Gold is stale on the weekend, so a 1-hour
+ *   rolling market spawned there would resolve on a flat price — we just skip.
+ * - **Stocks** (Phase 2): always false for now.
+ * - **Others** (politics/events — Phase 2): manual, not spawn-gated here.
+ *
+ * @param nowUtcSec — Unix-seconds timestamp; pass `Date.now()/1000` in production.
+ *                    Exposed as a parameter so tests can pin time.
+ */
+export function isMarketOpen(
+  spec: MarketGroupSpec,
+  nowUtcSec: number,
+): boolean {
+  if (spec.category === "crypto") return true;
+
+  if (spec.category === "commodity") {
+    const d = new Date(nowUtcSec * 1000);
+    const dow = d.getUTCDay(); // 0=Sun, 6=Sat
+    const hour = d.getUTCHours();
+    if (dow === 6) return false; // Sat, fully closed
+    if (dow === 0 && hour < 22) return false; // Sun before 22:00 UTC open
+    if (dow === 5 && hour >= 21) return false; // Fri 21:00 UTC and after
+    return true;
+  }
+
+  if (spec.category === "stocks") return false; // Phase 2 will open this
+  return false; // "others" — not spawn-scheduled
 }
 
 /** Format a Pyth 1e8 strike as `$XXX,XXX`. */

@@ -2,26 +2,36 @@ import { and, asc, count, desc, eq, lt, sql, type SQL } from "drizzle-orm";
 import { db } from "@/db";
 import { markets } from "@/db/schema";
 import { calculatePrices } from "@/lib/amm";
-import { RECURRING_DURATION_MINUTES } from "@/lib/constants";
-import { activePythGroups } from "@/lib/market-groups";
+import { fetchPythPrice } from "@/lib/aptos";
 import {
-  fetchCryptoPrices,
-  generateMarketQuestion,
-  roundStrikePrice,
-} from "@/lib/price-oracle";
+  activePythGroups,
+  pythFeedForGroup,
+  type MarketGroupSpec,
+} from "@/lib/market-groups";
 import type { MarketsResponse } from "@/types";
 
 const VALID_STATES: readonly string[] = ["OPEN", "CLOSED", "RESOLVED", "SETTLED"];
-// Registry-driven. Previously hardcoded to "btc-15m"/"eth-15m" (stale ids
-// predating the 3-min cadence) — the registry now keeps these in lockstep
-// with the on-chain cron routes.
-const RECURRING_GROUPS: { groupId: string; asset: "BTC" | "ETH" }[] =
-  activePythGroups().map((g) => ({
-    groupId: g.groupId,
-    asset: g.assetSymbol as "BTC" | "ETH",
-  }));
-const FALLBACK_PRICES = { btc: 85000, eth: 2000 };
+// Registry-driven. Every active `pyth` group in market-groups.ts is covered
+// here; adding a new recurring market (e.g. sol-3m, xau-1h) only requires a
+// registry entry. Previously hardcoded to BTC+ETH with per-asset branches.
+const RECURRING_SPECS: readonly MarketGroupSpec[] = activePythGroups();
+// Fallback display prices when Pyth Hermes is unreachable. Used purely for
+// the DB row's strike_price column; the ON-CHAIN strike is set from Hermes
+// via the spawn-recurring cron and is independent of these values.
+const FALLBACK_PRICES: Record<string, number> = {
+  BTC: 85_000,
+  ETH: 2_000,
+  XAU: 4_700,
+};
+const DEFAULT_FALLBACK_PRICE = 100;
 const RECURRING_ENSURE_COOLDOWN_MS = 30_000;
+
+function humanAssetName(symbol: string): string {
+  if (symbol === "BTC") return "Bitcoin";
+  if (symbol === "ETH") return "Ethereum";
+  if (symbol === "XAU") return "Gold";
+  return symbol;
+}
 
 let lastRecurringEnsureStartedAt = 0;
 let recurringEnsureInFlight: Promise<void> | null = null;
@@ -53,7 +63,8 @@ async function ensureActiveRecurringMarkets(): Promise<void> {
   const now = new Date();
 
   await Promise.all(
-    RECURRING_GROUPS.map(async ({ groupId, asset }) => {
+    RECURRING_SPECS.map(async (spec) => {
+      const { groupId, assetSymbol, durationSec, questionTemplate } = spec;
       try {
         await db
           .update(markets)
@@ -74,28 +85,34 @@ async function ensureActiveRecurringMarkets(): Promise<void> {
 
         if (openInGroup.length > 0) return;
 
-        let currentPrice: number;
+        // Pull the current price from Pyth Hermes via the group's configured
+        // feed id. Same source (beta on testnet / stable on mainnet) that
+        // the on-chain spawn uses for MarketConfig.strike_price, so the DB
+        // strike matches the chain within one refresh interval.
+        let displayPrice: number;
         try {
-          const prices = await fetchCryptoPrices();
-          currentPrice = asset === "BTC" ? prices.btc : prices.eth;
+          const feedId = pythFeedForGroup(spec);
+          const { price, expo } = await fetchPythPrice(feedId);
+          // Pyth returns price scaled by its per-feed exponent — typically
+          // -8 for crypto, -3 for XAU. Apply the real expo to get the
+          // human-readable decimal. On-chain still uses the raw integer.
+          displayPrice = Number(price) * 10 ** expo;
         } catch {
-          currentPrice = asset === "BTC" ? FALLBACK_PRICES.btc : FALLBACK_PRICES.eth;
+          displayPrice = FALLBACK_PRICES[assetSymbol] ?? DEFAULT_FALLBACK_PRICE;
         }
 
-        const openPrice = roundStrikePrice(currentPrice, asset);
-        const closeTime = new Date(now.getTime() + RECURRING_DURATION_MINUTES * 60 * 1000);
-        const question = generateMarketQuestion(asset);
+        const closeTime = new Date(now.getTime() + durationSec * 1000);
         const initialPrices = calculatePrices(1, 1);
-        const assetName = asset === "BTC" ? "Bitcoin" : "Ethereum";
+        const assetName = humanAssetName(assetSymbol);
 
         await db.insert(markets).values({
           slug: `recurring-${groupId}-${now.getTime()}`,
-          question,
+          question: questionTemplate,
           description: `Resolves YES if ${assetName} price at close is higher than at open. Price sourced from Pyth.`,
           state: "OPEN",
           marketType: "RECURRING",
-          asset,
-          strikePrice: String(openPrice),
+          asset: assetSymbol,
+          strikePrice: String(displayPrice),
           recurringGroupId: groupId,
           yesDemand: "1",
           noDemand: "1",
