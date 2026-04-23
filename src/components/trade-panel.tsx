@@ -41,6 +41,9 @@ export function TradePanel({
   const {
     data: activeCaseId,
     isLoading: isActiveCaseLoading,
+    isError: isActiveCaseError,
+    error: activeCaseError,
+    refetch: refetchActiveCase,
   } = useActiveCase(recurringGroupId);
   const trade = useTrade(recurringGroupId);
 
@@ -150,10 +153,37 @@ export function TradePanel({
     );
   }
 
+  if (isActiveCaseError) {
+    const msg =
+      activeCaseError instanceof Error ? activeCaseError.message : String(activeCaseError);
+    return (
+      <div className="glass rounded-lg p-6 space-y-3">
+        <p className="text-center text-no text-sm">Couldn&apos;t read active case from chain.</p>
+        <p className="text-center text-xs text-white/40 font-mono break-all">{msg}</p>
+        <button
+          onClick={() => refetchActiveCase()}
+          className="w-full px-4 py-2 bg-white/10 text-white text-xs font-semibold rounded-pill hover:bg-white/15 transition-all"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
   if (activeCaseId == null) {
     return (
-      <div className="glass rounded-lg p-6">
-        <p className="text-center text-white/40 text-sm">Market not active on-chain</p>
+      <div className="glass rounded-lg p-6 space-y-3">
+        <p className="text-center text-white/40 text-sm">No active case on-chain yet.</p>
+        <p className="text-center text-xs text-white/30">
+          The spawner runs every ~2 minutes. If this persists, the recurring
+          group may be paused — check the Markets page for a working round.
+        </p>
+        <button
+          onClick={() => refetchActiveCase()}
+          className="w-full px-4 py-2 bg-white/10 text-white text-xs font-semibold rounded-pill hover:bg-white/15 transition-all"
+        >
+          Refresh
+        </button>
       </div>
     );
   }

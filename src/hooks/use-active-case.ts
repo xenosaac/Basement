@@ -22,7 +22,15 @@ export function useActiveCase(groupId: string | null) {
   return useQuery({
     queryKey: activeCaseQueryKey(groupId ?? ""),
     enabled: Boolean(groupId),
-    staleTime: 30_000, // active case rotates every 3min — cheap to refetch
+    // 3-min cadence + cron is 2-min, so active case can rotate any second.
+    // Keep stale window short so a transient RPC failure doesn't stick a
+    // null/None in cache for the full round.
+    staleTime: 5_000,
+    // Self-heal: if the view hits a 429 / transient error, refetch soon.
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: true,
+    retry: 2,
+    retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 4000),
     queryFn: async (): Promise<bigint | null> => {
       if (!groupId) return null;
       const groupBytes = Array.from(new TextEncoder().encode(groupId));
