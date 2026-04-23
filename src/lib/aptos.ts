@@ -791,10 +791,12 @@ export async function fetchPythPrice(
 
 export async function getPythVAA(feedId: string): Promise<Uint8Array> {
   const id = feedId.startsWith("0x") ? feedId.slice(2) : feedId;
-  // Use Pyth Hermes V2 accumulator endpoint (required for post-2024 Pyth
-  // on-chain Move module). Legacy `/api/latest_vaas` returns batch VAAs that
-  // abort on-chain with `0x1::table 0x6507` (feed lookup NOT_FOUND) because
-  // the stored format no longer matches.
+  // Use the Pyth Hermes V2 accumulator endpoint — returns a PNAU VAA that
+  // the post-2024 Pyth Move module accepts. The stable vs beta channel
+  // (mainnet vs Aptos testnet) is determined entirely by PYTH_HERMES_URL
+  // + the feed ids that come with it; a stable-channel VAA submitted to
+  // Aptos testnet Wormhole aborts 0x6507 because testnet only has
+  // guardian_set[0] while stable VAAs are signed by guardian_set[5].
   const url = `${pythHermesUrl()}/v2/updates/price/latest?ids[]=${id}&encoding=base64`;
   const res = await fetch(url);
   if (!res.ok) {

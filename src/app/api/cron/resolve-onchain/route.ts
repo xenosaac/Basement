@@ -4,15 +4,17 @@
 //
 // Resolve path is ENV-configurable via `ORACLE_RESOLVE_MODE`:
 //   - "oracle" : on-chain Pyth via `case_vault::resolve_oracle(case_id, vaa)`.
-//                Requires admin to have legacy `0x1::coin::CoinStore<AptosCoin>`
-//                for Pyth fee (1 octa). If admin has FA-APT only, aborts
-//                `0x1::table 0x6507` (ENOT_FOUND on CoinStore lookup).
-//   - "admin"  : off-chain Pyth Hermes parsed price → compute outcome →
-//                `case_vault::admin_resolve(case_id, outcome)`. Fallback when
-//                `oracle` path is unavailable. Outcome trust = admin signature.
-//   - "auto"   : (future) try oracle first, fall back to admin on abort.
-// Default: "admin" (current workaround — non-custodial, works without admin
-// CoinStore setup).
+//                PRODUCTION PATH — fully non-custodial, outcome computed on
+//                chain from a Pyth VAA. Requires PYTH_HERMES_URL + feed ids
+//                to match the deployment chain's Pyth/Wormhole channel
+//                (Aptos testnet → hermes-beta + beta feed ids; mainnet →
+//                hermes + stable feed ids). See README "Oracle path".
+//   - "admin"  : admin backend computes outcome off-chain from stable
+//                Hermes → `case_vault::admin_resolve(case_id, outcome)`.
+//                Emergency escape hatch only; admin still can NOT move
+//                user funds (Move module enforces), but the outcome bit
+//                is trusted. Used for one-shot zombie cleanup.
+//   - "auto"   : (future) try oracle, fall back to admin on abort.
 
 import { NextResponse } from "next/server";
 

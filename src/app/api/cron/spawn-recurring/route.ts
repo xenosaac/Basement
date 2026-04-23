@@ -10,6 +10,7 @@ import {
   buildSpawnRecurring3minTxn,
   getPythVAA,
   moduleAddress,
+  pythHermesUrl,
   readCaseState,
   submitAdminTxnsParallel,
   type InputTransactionData,
@@ -28,7 +29,10 @@ import {
  */
 async function fetchCurrentPrice(feedId: string): Promise<bigint> {
   const id = feedId.startsWith("0x") ? feedId.slice(2) : feedId;
-  const url = `https://hermes.pyth.network/v2/updates/price/latest?ids[]=${id}`;
+  // Resolve the Hermes base URL at call-time — do NOT hardcode, because the
+  // stable vs beta channel swap is env-driven (see PYTH_HERMES_URL docs in
+  // .env.example). Aptos testnet must use beta; mainnet uses stable.
+  const url = `${pythHermesUrl()}/v2/updates/price/latest?ids[]=${id}`;
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) {
     throw new Error(`Pyth Hermes price fetch failed: ${res.status}`);
