@@ -80,19 +80,22 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     questionTemplate: "Will Ethereum go up in the next 3 minutes?",
     active: true,
   },
-  "xau-1h": {
-    groupId: "xau-1h",
+  "xau-daily": {
+    groupId: "xau-daily",
     assetSymbol: "XAU",
     category: "commodity",
     sortName: "XAU",
     resolutionKind: "pyth",
     pythFeedId: "",
-    // Directional 1-hour: YES if close > open. Same tickSize=1 trick as BTC-3m.
-    durationSec: 3600,
+    // Directional 24-hour: YES if price in 24h is higher than at spawn.
+    // Same tickSize=1 trick as BTC-3m (strike === open). 86400s matches
+    // the LBMA/COMEX daily-settle rhythm so the market closes a full
+    // trading day after it opens.
+    durationSec: 86_400,
     tickSize: 1n,
     poolDepth: 500_000_000n,
     spawnCadence: "on-resolve",
-    questionTemplate: "Will Gold go up in the next hour?",
+    questionTemplate: "Will Gold's price be higher 24 hours from now?",
     active: true,
   },
 };

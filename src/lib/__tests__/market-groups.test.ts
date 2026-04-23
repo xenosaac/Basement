@@ -9,7 +9,7 @@ function utc(iso: string): number {
 }
 
 const btcSpec: MarketGroupSpec = MARKET_GROUPS["btc-3m"];
-const xauSpec: MarketGroupSpec = MARKET_GROUPS["xau-1h"];
+const xauSpec: MarketGroupSpec = MARKET_GROUPS["xau-daily"];
 
 describe("isMarketOpen", () => {
   it("crypto is always open", () => {
@@ -65,14 +65,14 @@ describe("MARKET_GROUPS registry", () => {
   it("has BTC + ETH + XAU all active", () => {
     expect(MARKET_GROUPS["btc-3m"]?.active).toBe(true);
     expect(MARKET_GROUPS["eth-3m"]?.active).toBe(true);
-    expect(MARKET_GROUPS["xau-1h"]?.active).toBe(true);
+    expect(MARKET_GROUPS["xau-daily"]?.active).toBe(true);
   });
 
-  it("xau-1h is categorized as commodity with hourly cadence", () => {
-    const xau = MARKET_GROUPS["xau-1h"];
+  it("xau-daily is categorized as commodity with 24-hour cadence", () => {
+    const xau = MARKET_GROUPS["xau-daily"];
     expect(xau.category).toBe("commodity");
     expect(xau.sortName).toBe("XAU");
-    expect(xau.durationSec).toBe(3600);
+    expect(xau.durationSec).toBe(86_400);
     expect(xau.resolutionKind).toBe("pyth");
   });
 });
