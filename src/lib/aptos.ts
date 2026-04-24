@@ -30,7 +30,10 @@
 import {
   Aptos,
   AptosConfig,
+  MoveOption,
+  MoveVector,
   Network,
+  U8,
   type InputEntryFunctionData,
   type InputViewFunctionData,
   type MoveResource,
@@ -223,6 +226,10 @@ export interface CaseState {
   maxTradeBps: number;
   maxStalenessSec: number;
   assetPythFeedId: string; // hex
+  /** MarketConfig.recurring_group_id: Option<vector<u8>>. Decoded as the
+   *  UTF-8 group id string when `Some`, else `null`. Use this (not feed id)
+   *  to match a case back to its spec — up/down groups share one feed. */
+  recurringGroupId: string | null;
   yesMetadata?: Address; // derived from vault, used by T4-06
   noMetadata?: Address;
 }
@@ -371,6 +378,26 @@ export function parseCaseVaultResource(
   const big = (k: string): bigint => toBigInt(pick(k) as string | number | bigint);
   const num = (k: string): number => Number(pick(k));
 
+  // Move's `Option<vector<u8>>` serializes as `{ vec: ["0x..."] }` (Some) or
+  // `{ vec: [] }` (None). Decode the hex bytes back to the original UTF-8
+  // group id string so callers can match against the registry directly.
+  const rawGroupOpt = pick("recurring_group_id") as
+    | { vec?: unknown[] }
+    | undefined;
+  let recurringGroupId: string | null = null;
+  const vec = rawGroupOpt?.vec;
+  if (Array.isArray(vec) && vec.length > 0) {
+    const hex = String(vec[0]).replace(/^0x/, "");
+    try {
+      const bytes = new Uint8Array(
+        hex.match(/.{1,2}/g)!.map((h) => parseInt(h, 16)),
+      );
+      recurringGroupId = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      recurringGroupId = null;
+    }
+  }
+
   return {
     caseId,
     vaultAddress,
@@ -387,6 +414,7 @@ export function parseCaseVaultResource(
     maxTradeBps: num("max_trade_bps"),
     maxStalenessSec: num("max_staleness_sec"),
     assetPythFeedId: String(pick("asset_pyth_feed_id")),
+    recurringGroupId,
     yesMetadata: pick("yes_metadata")
       ? String(
           (pick("yes_metadata") as { inner?: string }).inner ??
@@ -939,6 +967,72 @@ export function buildSpawnRecurring3minTxn(
         currentPrice.toString(),
         tickSize.toString(),
         poolDepth.toString(),
+      ],
+    },
+  };
+}
+
+/**
+ * Build `market_factory::create_market` — the generic recurring-market spawn
+ * path used by strike-based groups (e.g. `xau-daily-up`/`-down`). Signature
+ * mirrors `create_market` in `move/basement/sources/market_factory.move`.
+ *
+ * `recurring_group_id: Option<vector<u8>>` is the tricky bit. We wrap with
+ * {@link MoveOption} + {@link MoveVector.U8} so the SDK emits the correct
+ * nested BCS. **Must run `aptos.transaction.simulate.simple` once before the
+ * first live submission** — an encoding miss throws `deserialize failed` on
+ * chain with a large gas_used and no emitted events.
+ */
+export interface CreateMarketParams {
+  assetPythFeedId: string; // hex
+  strikePriceRaw: bigint; // u64 at feed's Pyth exponent
+  closeTimeSec: number; // Unix seconds
+  recurringGroupId: string; // UTF-8 group id, gets wrapped as Option::some
+  recurringAutoSpawn: boolean;
+  recurringDurationSeconds: number;
+  marketType: number; // TS-side MARKET_TYPE_* constant (u8)
+  thresholdType: 0 | 1; // ABOVE=0, BELOW=1
+  feeBps: number; // u64
+  poolDepth: bigint; // u64 (FA 1e6 decimals for vUSD)
+  maxTradeBps: number; // u64
+  maxStalenessSec: number; // u64
+  questionHash?: Uint8Array; // defaults to empty
+  metadataHash?: Uint8Array; // defaults to empty
+}
+
+export function buildCreateMarketTxn(
+  params: CreateMarketParams,
+): InputTransactionData {
+  const feedBytes = Array.from(fromHex(params.assetPythFeedId));
+  const groupBytes = new TextEncoder().encode(params.recurringGroupId);
+  // Option::some(vector<u8>) via explicit BCS: wrap bytes into MoveVector<U8>,
+  // then wrap that into MoveOption. Plain JS arrays are NOT used here — the
+  // nested generic type needs explicit BCS so the SDK does not emit a bare
+  // vector<u8> where Option is expected.
+  const groupOption = new MoveOption<MoveVector<U8>>(
+    new MoveVector<U8>(Array.from(groupBytes).map((b) => new U8(b))),
+  );
+  const questionHash = Array.from(params.questionHash ?? new Uint8Array());
+  const metadataHash = Array.from(params.metadataHash ?? new Uint8Array());
+  return {
+    data: {
+      function: entryFn("market_factory", "create_market"),
+      typeArguments: [],
+      functionArguments: [
+        feedBytes, // asset_pyth_feed_id: vector<u8>
+        params.strikePriceRaw.toString(), // strike_price: u64
+        params.closeTimeSec.toString(), // close_time: u64
+        groupOption, // recurring_group_id: Option<vector<u8>>
+        params.recurringAutoSpawn, // recurring_auto_spawn: bool
+        params.recurringDurationSeconds.toString(), // recurring_duration_seconds: u64
+        params.marketType, // market_type: u8
+        params.thresholdType, // threshold_type: u8
+        params.feeBps.toString(), // fee_bps: u64
+        params.poolDepth.toString(), // pool_depth: u64
+        params.maxTradeBps.toString(), // max_trade_bps: u64
+        params.maxStalenessSec.toString(), // max_staleness_sec: u64
+        questionHash, // question_hash: vector<u8>
+        metadataHash, // metadata_hash: vector<u8>
       ],
     },
   };

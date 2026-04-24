@@ -32,8 +32,8 @@ import {
   type OutcomeCode,
 } from "@/lib/aptos";
 import {
-  activeGroupsByCadence,
   pythFeedForGroup,
+  resolvableGroupsByCadence,
 } from "@/lib/market-groups";
 
 // Matches Move `case_vault.move`: STATE_RESOLVED = 2, STATE_INVALID = 3.
@@ -95,8 +95,11 @@ export async function GET(req: Request): Promise<Response> {
   }
 
   const mode = getResolveMode();
-  const groups = activeGroupsByCadence("on-resolve")
-    .filter((g) => g.resolutionKind === "pyth" && g.active)
+  // resolvableGroupsByCadence includes legacy-cleanup groups so lingering
+  // cases (e.g. old xau-daily after the 1g up/down pivot) still get resolved
+  // and cleared. Spawn + UI never see those legacy groups.
+  const groups = resolvableGroupsByCadence("on-resolve")
+    .filter((g) => g.resolutionKind === "pyth")
     .map((g) => ({ ...g, feedId: pythFeedForGroup(g) }));
 
   const nowSec = BigInt(Math.floor(Date.now() / 1000));

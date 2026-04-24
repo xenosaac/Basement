@@ -5,6 +5,7 @@ import { calculatePrices } from "@/lib/amm";
 import { fetchPythPrice } from "@/lib/aptos";
 import {
   activePythGroups,
+  deriveMarketParams,
   isActiveRecurringGroupId,
   pythFeedForGroup,
   type MarketGroupSpec,
@@ -62,10 +63,11 @@ export function parseMarketsSearchParams(searchParams: URLSearchParams): Markets
 
 async function ensureActiveRecurringMarkets(): Promise<void> {
   const now = new Date();
+  const nowSec = Math.floor(now.getTime() / 1000);
 
   await Promise.all(
     RECURRING_SPECS.map(async (spec) => {
-      const { groupId, assetSymbol, durationSec, questionTemplate } = spec;
+      const { groupId, assetSymbol } = spec;
       try {
         await db
           .update(markets)
@@ -86,41 +88,50 @@ async function ensureActiveRecurringMarkets(): Promise<void> {
 
         if (openInGroup.length > 0) return;
 
-        // Pull the current price from Pyth Hermes via the group's configured
-        // feed id. Same source (beta on testnet / stable on mainnet) that
-        // the on-chain spawn uses for MarketConfig.strike_price, so the DB
-        // strike matches the chain within one refresh interval.
-        let displayPrice: number;
+        // Pull the current price from Pyth Hermes and run it through the SAME
+        // deriveMarketParams that the spawn cron uses. Guarantees the DB
+        // row's strike / closeTime / question match what the on-chain
+        // create_market (or spawn_recurring_3min) call will produce.
+        const feedId = pythFeedForGroup(spec);
+        let priceRaw: bigint;
+        let priceExpo: number;
+        let derivedFromPyth = true;
         try {
-          const feedId = pythFeedForGroup(spec);
           const { price, expo } = await fetchPythPrice(feedId);
-          // Pyth returns price scaled by its per-feed exponent — typically
-          // -8 for crypto, -3 for XAU. Apply the real expo to get the
-          // human-readable decimal. On-chain still uses the raw integer.
-          displayPrice = Number(price) * 10 ** expo;
+          priceRaw = price;
+          priceExpo = expo;
         } catch {
-          displayPrice = FALLBACK_PRICES[assetSymbol] ?? DEFAULT_FALLBACK_PRICE;
+          // Fallback: synthesise a raw price from our hardcoded display
+          // fallback table at the spec's declared expo.
+          const fallback =
+            FALLBACK_PRICES[assetSymbol] ?? DEFAULT_FALLBACK_PRICE;
+          priceExpo = spec.priceExpo;
+          priceRaw = BigInt(
+            Math.round(fallback * Math.pow(10, -spec.priceExpo)),
+          );
+          derivedFromPyth = false;
         }
+        void derivedFromPyth; // reserved for future log line
+        const derived = deriveMarketParams(spec, priceRaw, priceExpo, nowSec);
 
-        const closeTime = new Date(now.getTime() + durationSec * 1000);
         const initialPrices = calculatePrices(1, 1);
         const assetName = humanAssetName(assetSymbol);
 
         await db.insert(markets).values({
           slug: `recurring-${groupId}-${now.getTime()}`,
-          question: questionTemplate,
+          question: derived.question,
           description: `Resolves YES if ${assetName} price at close is higher than at open. Price sourced from Pyth.`,
           state: "OPEN",
           marketType: "RECURRING",
           asset: assetSymbol,
-          strikePrice: String(displayPrice),
+          strikePrice: String(derived.strikeDisplay),
           recurringGroupId: groupId,
           yesDemand: "1",
           noDemand: "1",
           yesPrice: String(initialPrices.yesPrice),
           noPrice: String(initialPrices.noPrice),
           totalVolume: "0",
-          closeTime,
+          closeTime: new Date(derived.closeTime * 1000),
         });
       } catch (err) {
         console.error(`[auto-refresh] Failed to refresh ${groupId}:`, err);

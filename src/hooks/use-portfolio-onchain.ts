@@ -47,7 +47,22 @@ function normalizeFeedId(raw: string): string {
   return hex.startsWith("0x") ? hex : `0x${hex}`;
 }
 
-function matchGroupIdForFeed(feedId: string): string | undefined {
+/**
+ * Resolve a case's spec. Prefers the on-chain `recurring_group_id` field
+ * (parsed by {@link readCaseState}) — this is the only correct path for
+ * up/down pairs (xau-daily-up + xau-daily-down share one Pyth feed, so
+ * feed-id matching would collapse them to the same spec). Falls back to
+ * feed-id matching for legacy cases spawned before MarketConfig stored
+ * the group id.
+ */
+function resolveSpecForCase(
+  recurringGroupId: string | null,
+  feedId: string,
+): ReturnType<typeof groupById> {
+  if (recurringGroupId) {
+    const bySpec = groupById(recurringGroupId);
+    if (bySpec) return bySpec;
+  }
   const target = normalizeFeedId(feedId);
   for (const spec of Object.values(MARKET_GROUPS)) {
     if (spec.resolutionKind !== "pyth") continue;
@@ -57,7 +72,7 @@ function matchGroupIdForFeed(feedId: string): string | undefined {
     } catch {
       continue;
     }
-    if (groupFeed === target) return spec.groupId;
+    if (groupFeed === target) return spec;
   }
   return undefined;
 }
@@ -102,14 +117,16 @@ export function usePortfolioOnChain(): UseQueryResult<OnChainPortfolio> {
 
       const positions: OnChainPosition[] = perCase.map(
         ({ cid, state, yesShares, noShares }) => {
-          const groupId = matchGroupIdForFeed(state.assetPythFeedId);
-          const spec = groupId ? groupById(groupId) : undefined;
+          const spec = resolveSpecForCase(
+            state.recurringGroupId,
+            state.assetPythFeedId,
+          );
           const question = spec
             ? renderQuestion(spec, state.strikePrice, Number(state.closeTime))
             : undefined;
           return {
             caseId: cid,
-            groupId,
+            groupId: spec?.groupId,
             question,
             closeTime: Number(state.closeTime),
             state: state.state,

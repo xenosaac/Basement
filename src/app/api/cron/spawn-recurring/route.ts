@@ -7,7 +7,9 @@ import { NextResponse } from "next/server";
 
 import {
   aptos,
+  buildCreateMarketTxn,
   buildSpawnRecurring3minTxn,
+  fetchPythPrice,
   getPythVAA,
   moduleAddress,
   pythHermesUrl,
@@ -17,6 +19,7 @@ import {
 } from "@/lib/aptos";
 import {
   activeGroupsByCadence,
+  deriveMarketParams,
   isMarketOpen,
   pythFeedForGroup,
 } from "@/lib/market-groups";
@@ -80,6 +83,7 @@ export async function GET(req: Request): Promise<Response> {
         groupId: string;
         kind: "ready";
         payload: InputTransactionData;
+        durationSec: number;
       };
 
   const nowUtcSec = Math.floor(Date.now() / 1000);
@@ -123,22 +127,50 @@ export async function GET(req: Request): Promise<Response> {
           };
         }
 
-        // Fetch current price + prefetch VAA in parallel (Pyth Hermes).
-        const [price] = await Promise.all([
-          fetchCurrentPrice(group.feedId),
-          getPythVAA(group.feedId).catch(() => undefined),
-        ]);
+        // Branch by spawnStrategy. Legacy spawn_recurring_3min keeps the
+        // hardcoded 180s close; create_market pulls expo-aware price from
+        // Hermes and runs it through deriveMarketParams.
+        const strategy = group.spawnStrategy;
+        if (strategy.kind === "spawn_recurring_3min") {
+          const [price] = await Promise.all([
+            fetchCurrentPrice(group.feedId),
+            getPythVAA(group.feedId).catch(() => undefined),
+          ]);
+          return {
+            groupId: group.groupId,
+            kind: "ready",
+            payload: buildSpawnRecurring3minTxn(
+              group.groupId,
+              group.feedId,
+              price,
+              group.tickSize,
+              group.poolDepth,
+            ),
+            durationSec: 180,
+          };
+        }
 
+        // create_market path — XAU up/down, future strike-based groups.
+        const { price, expo } = await fetchPythPrice(group.feedId);
+        const derived = deriveMarketParams(group, price, expo, nowUtcSec);
         return {
           groupId: group.groupId,
           kind: "ready",
-          payload: buildSpawnRecurring3minTxn(
-            group.groupId,
-            group.feedId,
-            price,
-            group.tickSize,
-            group.poolDepth,
-          ),
+          payload: buildCreateMarketTxn({
+            assetPythFeedId: group.feedId,
+            strikePriceRaw: derived.strikeRaw,
+            closeTimeSec: derived.closeTime,
+            recurringGroupId: group.groupId,
+            recurringAutoSpawn: false, // backend cron handles, not on-chain auto
+            recurringDurationSeconds: derived.durationSec,
+            marketType: strategy.marketType,
+            thresholdType: derived.thresholdType,
+            feeBps: strategy.feeBps,
+            poolDepth: group.poolDepth,
+            maxTradeBps: strategy.maxTradeBps,
+            maxStalenessSec: strategy.maxStalenessSec,
+          }),
+          durationSec: derived.durationSec,
         };
       } catch (err) {
         return {
@@ -172,7 +204,7 @@ export async function GET(req: Request): Promise<Response> {
     const r = results[i];
     if (r.success && r.txnHash) {
       spawned.push({ group: p.groupId, txnHash: r.txnHash });
-      closeTimes.push(Math.floor(Date.now() / 1000) + 180);
+      closeTimes.push(Math.floor(Date.now() / 1000) + p.durationSec);
     } else {
       skipped.push({
         group: p.groupId,
