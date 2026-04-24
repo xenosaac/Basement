@@ -14,17 +14,32 @@ export function shortenAddress(address: string): string {
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
 
-export function timeRemaining(closeTime: string | null): string {
+/**
+ * Format the time remaining until `closeTime`. Pass a live `nowMs` for a
+ * countdown that ticks every second (callers should re-render via a state
+ * that updates from `setInterval`); omit it for a static snapshot.
+ *
+ * Scale-aware output:
+ *   > 24h → "Xd Yh"           (XAU-daily when fresh)
+ *   >= 1h → "Xh Ym Zs"        (XAU-daily mid-life)
+ *   <  1h → "Ym Zs"           (BTC/ETH 3-min, XAU last hour)
+ *   <= 0  → "Closed"
+ */
+export function timeRemaining(
+  closeTime: string | null,
+  nowMs: number = Date.now(),
+): string {
   if (!closeTime) return "No deadline";
-  const diff = new Date(closeTime).getTime() - Date.now();
+  const diff = new Date(closeTime).getTime() - nowMs;
   if (diff <= 0) return "Closed";
-  const hours = Math.floor(diff / (1000 * 60 * 60));
-  const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-  if (hours > 24) {
-    const days = Math.floor(hours / 24);
-    return `${days}d ${hours % 24}h`;
-  }
-  return `${hours}h ${minutes}m`;
+  const totalSec = Math.floor(diff / 1000);
+  const days = Math.floor(totalSec / 86400);
+  const hours = Math.floor((totalSec % 86400) / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  return `${minutes}m ${seconds}s`;
 }
 
 export function isValidAddress(address: string): boolean {

@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { useMarket } from "@/hooks/use-market";
 import { usePortfolioOnChain } from "@/hooks/use-portfolio-onchain";
@@ -14,6 +15,15 @@ export default function MarketPage() {
   // Active on-chain case id for this market's recurring group (drives
   // "Your Positions" filter + TradePanel). Phase B will add claim button.
   const { data: activeCaseId } = useActiveCase(market?.recurringGroupId ?? null);
+
+  // Per-second tick so the "Xm Ys left" countdown in the header updates
+  // live instead of being frozen to the last render. Matches the Quick Play
+  // strip granularity from market-grid.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   if (isLoading) {
     return (
@@ -56,7 +66,9 @@ export default function MarketPage() {
             </span>
           )}
           {market.closeTime && isLive && (
-            <span className="text-xs text-white/30">{timeRemaining(market.closeTime)} left</span>
+            <span className="text-xs text-white/30 font-mono tabular-nums">
+              {timeRemaining(market.closeTime, nowMs)} left
+            </span>
           )}
         </div>
         <h1 className="text-xl font-bold text-white mb-2">{market.question}</h1>
