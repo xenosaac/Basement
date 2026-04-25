@@ -16,3 +16,13 @@
 
 export * from "./pm-amm";
 export * from "./v3-pricing";
+export * from "./types";
+export * from "./asset-params";
+export * from "./barrier-strike";
+export * from "./macro-calendar";
+export * from "./market-maker";
+
+// NB: vol-estimator.ts intentionally NOT re-exported here. It imports the
+// Drizzle/`pg` DB client which is server-only — re-exporting it pulls `pg`
+// into the client bundle (`tls`/`net` build errors). Server callers import
+// it directly:  import { computeRealizedVol7d } from "@/lib/quant/vol-estimator";
