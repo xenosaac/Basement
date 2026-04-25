@@ -1,13 +1,26 @@
 # Basement
 
-**Non-custodial prediction markets on Aptos.**
-Your keys. Your positions. Your gas.
+**Prediction markets on Aptos · v0 custodial DB-AMM demo.**
+Faucet vUSD · curve-priced YES/NO shares · sell anytime before resolve. v1 roadmap: switch to on-chain CaseVault CPMM (wallet-signed, non-custodial).
 
 ---
 
 ## What it is
 
-A prediction market where every action is a signed, on-chain transaction. No custodial balance. No internal matching engine. No admin-held user funds. Connect an Aptos wallet, sign, trade.
+A prediction market where 3-min BTC/ETH rounds (and longer cadences) price YES/NO shares on a **Paradigm pm-AMM** curve (`(y−x)·Φ((y−x)/L) + L·φ((y−x)/L) − y = 0`). Buys move the curve; sells let you exit before resolve and pocket the slippage. v0 keeps balances + reserves in Postgres against a faucet-issued vUSD ledger so the demo works without per-trade wallet signing — the on-chain CaseVault CPMM (`move/basement/sources/case_vault.move`) ships unchanged and is the v1 migration target.
+
+## Architecture (v0 vs v1)
+
+| | **v0 (current — hackathon demo)** | **v1 (roadmap)** |
+|---|---|---|
+| Custody | DB ledger (`user_balances_v3`) — custodial | On-chain CaseVault — non-custodial |
+| Pricing | Paradigm pm-AMM in `src/lib/pm-amm.ts`, state in `cases_v3.{up,down}_shares_e8` | Same curve on-chain via `case_vault.move` CPMM |
+| Trade tx | POST `/api/bet`, `/api/sell` (server-signed) | Wallet-signed `buy_yes` / `sell_yes` entry fun |
+| Positions | `positions_v3` rows | On-chain FA balances (YES / NO) |
+| Resolve | Pyth on-chain → `/api/cron/tick` mark-to-share | Pyth on-chain → `case_vault::resolve_oracle` |
+| Identity | Aptos wallet sign-in (auth only) | Same |
+
+**Why custodial in v0:** the on-chain CaseVault per-market state-slot deposit is ~0.04 APT/market × ~1080 markets/day at full cadence = 20–43 APT/day ($170-340) running cost. v0 ships in days; v1 batches markets into a single Resource (`Table<u64, Case>`) to bring this under $5/day, then re-enables wallet-signed trades.
 
 ## How to run
 

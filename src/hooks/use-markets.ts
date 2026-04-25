@@ -33,7 +33,9 @@ export function useMarkets(params?: UseMarketsParams) {
       return res.json();
     },
     initialData: params?.initialData,
-    staleTime: 30_000,
+    staleTime: 3_000,
     gcTime: 5 * 60_000,
+    refetchInterval: 4_000,
+    refetchOnWindowFocus: true,
   });
 }

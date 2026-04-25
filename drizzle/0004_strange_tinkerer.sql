@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "price_ticks_v3_feed_publish_uniq" ON "price_ticks_v3" USING btree ("pyth_feed_id","publish_time_sec");

@@ -1,0 +1,1 @@
+ALTER TABLE "cases_v3" ADD CONSTRAINT "cases_v3_series_id_round_idx_pk" PRIMARY KEY("series_id","round_idx");

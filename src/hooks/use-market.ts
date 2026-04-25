@@ -12,11 +12,12 @@ export function useMarket(id: string) {
       return res.json();
     },
     enabled: !!id,
-    // Only poll while the market is OPEN (trading live). Once CLOSED/RESOLVED/SETTLED,
-    // data is immutable — stop polling. Saves ~15 of 18 requests per 3-min recurring round.
+    // Poll while OPEN (live trading) and CLOSED (awaiting resolve). Stop
+    // only once RESOLVED/SETTLED — those states are immutable.
     refetchInterval: (query) => {
       const state = query.state.data?.state;
-      return state === "OPEN" ? 10_000 : false;
+      if (state === "RESOLVED" || state === "SETTLED") return false;
+      return state === "OPEN" ? 3_000 : 5_000;
     },
   });
 }

@@ -46,6 +46,9 @@ export function Navbar({ withWalletProvider = true }: { withWalletProvider?: boo
           <Link href="/markets" className="text-sm text-white/50 hover:text-white transition-colors">
             Markets
           </Link>
+          <Link href="/leaderboard" className="text-sm text-white/50 hover:text-white transition-colors">
+            Leaderboard
+          </Link>
           <MaybeWalletProvider enabled={withWalletProvider}>
             <NavbarDesktopPortfolioLink />
           </MaybeWalletProvider>
@@ -75,6 +78,9 @@ export function Navbar({ withWalletProvider = true }: { withWalletProvider?: boo
         <div className="fixed top-[68px] left-4 right-4 z-50 glass rounded-lg p-4 flex flex-col gap-3 md:hidden">
           <Link href="/markets" onClick={() => setMobileOpen(false)} className="text-sm text-white/70 hover:text-white py-2 border-b border-glass-border">
             Markets
+          </Link>
+          <Link href="/leaderboard" onClick={() => setMobileOpen(false)} className="text-sm text-white/70 hover:text-white py-2 border-b border-glass-border">
+            Leaderboard
           </Link>
           <MaybeWalletProvider enabled={withWalletProvider}>
             <NavbarMobileWalletItems onNavigate={() => setMobileOpen(false)} />

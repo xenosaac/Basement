@@ -14,7 +14,7 @@
 // tables (positions/trades/claims) — that's Option 2b after the custodial
 // writer is deleted.
 
-import { eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 import { db } from "@/db";
 import {

@@ -3,6 +3,8 @@
 import { AptosWalletAdapterProvider } from "@aptos-labs/wallet-adapter-react";
 import { Network } from "@aptos-labs/ts-sdk";
 import { AptosAuthProvider } from "./aptos-auth-provider";
+import { ConnectModalProvider } from "./connect-modal-provider";
+import { ToastQueueProvider } from "./toast-queue-provider";
 
 const OPT_IN_WALLETS = [
   "OKX Wallet",
@@ -47,7 +49,11 @@ export function WalletProviders({ children }: { children: React.ReactNode }) {
         console.error("Aptos wallet error:", err);
       }}
     >
-      <AptosAuthProvider>{children}</AptosAuthProvider>
+      <AptosAuthProvider>
+        <ConnectModalProvider>
+          <ToastQueueProvider>{children}</ToastQueueProvider>
+        </ConnectModalProvider>
+      </AptosAuthProvider>
     </AptosWalletAdapterProvider>
   );
 }

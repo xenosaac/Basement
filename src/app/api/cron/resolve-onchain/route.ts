@@ -17,13 +17,17 @@
 //   - "auto"   : (future) try oracle, fall back to admin on abort.
 
 import { NextResponse } from "next/server";
+import { and, eq } from "drizzle-orm";
 
+import { db } from "@/db";
+import { markets } from "@/db/schema";
 import {
   aptos,
   buildAdminResolveTxn,
   buildClearActiveGroupTxn,
   buildResolveOracleTxn,
   fetchPythPrice,
+  fetchResolvedEventForTxn,
   getPythVAA,
   moduleAddress,
   readCaseState,
@@ -35,6 +39,11 @@ import {
   pythFeedForGroup,
   resolvableGroupsByCadence,
 } from "@/lib/market-groups";
+import {
+  outcomeCodeToLabel,
+  settlementDisplayPrices,
+  type OutcomeLabel,
+} from "@/lib/market-settlement";
 
 // Matches Move `case_vault.move`: STATE_RESOLVED = 2, STATE_INVALID = 3.
 const STATE_RESOLVED = 2;
@@ -59,7 +68,7 @@ export const dynamic = "force-dynamic";
 
 type GroupPrep =
   | { groupId: string; kind: "skip"; reason: string; nextCloseTime?: number }
-  | { groupId: string; kind: "clear-only"; caseId: bigint }
+  | { groupId: string; kind: "clear-only"; caseId: bigint; outcomeCode: number }
   | {
       groupId: string;
       kind: "admin-resolve";
@@ -72,6 +81,58 @@ type GroupPrep =
       caseId: bigint;
       vaa: Uint8Array;
     };
+
+/**
+ * Write resolved state into the markets DB row. Independent of clear-tx
+ * success — if resolve succeeded, the market is resolved whether or not
+ * the factory's active slot was cleared.
+ */
+async function applyResolvedDbUpdate(
+  caseId: bigint,
+  groupId: string,
+  outcomeLabel: OutcomeLabel,
+): Promise<boolean> {
+  const now = new Date();
+  const prices = settlementDisplayPrices("RESOLVED", outcomeLabel, {
+    yesPrice: 0.5,
+    noPrice: 0.5,
+  });
+  const base = {
+    state: "RESOLVED" as const,
+    resolvedOutcome: outcomeLabel,
+    resolvedAt: now,
+    yesPrice: String(prices.yesPrice),
+    noPrice: String(prices.noPrice),
+    updatedAt: now,
+  };
+
+  const primary = await db
+    .update(markets)
+    .set(base)
+    .where(eq(markets.caseId, caseId))
+    .returning({ id: markets.id });
+  if (primary.length > 0) return true;
+
+  // Fallback: earlier spawn failed to write caseId onto the row. Update any
+  // OPEN row in the group as a last resort.
+  const fallback = await db
+    .update(markets)
+    .set({ ...base, caseId })
+    .where(
+      and(
+        eq(markets.recurringGroupId, groupId),
+        eq(markets.state, "OPEN"),
+      ),
+    )
+    .returning({ id: markets.id });
+  if (fallback.length > 0) {
+    console.warn(
+      `[resolve-onchain] DB row for case ${caseId} found via groupId fallback (${groupId})`,
+    );
+    return true;
+  }
+  return false;
+}
 
 function computeOutcome(
   price: bigint,
@@ -125,7 +186,14 @@ export async function GET(req: Request): Promise<Response> {
         const state = await readCaseState(caseId);
 
         if (state.state === STATE_RESOLVED || state.state === STATE_INVALID) {
-          return { groupId: group.groupId, kind: "clear-only", caseId };
+          // Chain already resolved — cron just needs to clear the active
+          // slot. Capture the outcome for DB sync.
+          return {
+            groupId: group.groupId,
+            kind: "clear-only",
+            caseId,
+            outcomeCode: state.resolvedOutcome,
+          };
         }
         if (state.closeTime > nowSec) {
           return {
@@ -195,12 +263,19 @@ export async function GET(req: Request): Promise<Response> {
     group: string;
     caseId: string;
     mode: "oracle" | "admin";
-    outcome?: OutcomeCode;
+    outcome?: OutcomeLabel;
     resolveHash: string;
     clearHash?: string;
     clearError?: string;
+    dbUpdated: boolean;
   }> = [];
-  const cleared: Array<{ group: string; caseId: string; txnHash: string }> = [];
+  const cleared: Array<{
+    group: string;
+    caseId: string;
+    txnHash?: string;
+    clearError?: string;
+    dbUpdated: boolean;
+  }> = [];
   const skipped: Array<{ group: string; reason: string }> = [];
   const closeTimes: number[] = [];
 
@@ -211,56 +286,134 @@ export async function GET(req: Request): Promise<Response> {
     }
   }
 
+  // Pass 1 — record resolve outcomes, update DB independently of clear-tx.
+  const dbUpdateTasks: Array<Promise<void>> = [];
   for (let i = 0; i < payloadMeta.length; i++) {
     const meta = payloadMeta[i];
     const r = results[i];
+
     if (meta.kind === "oracle-resolve" || meta.kind === "admin-resolve") {
       const resolveMode = meta.kind === "oracle-resolve" ? "oracle" : "admin";
-      if (r.success && r.txnHash) {
-        const clearMeta = payloadMeta[i + 1];
-        const clearResult = results[i + 1];
-        const base = {
-          group: meta.groupId,
-          caseId: meta.caseId.toString(),
-          mode: resolveMode as "oracle" | "admin",
-          resolveHash: r.txnHash,
-          ...(meta.kind === "admin-resolve" ? { outcome: meta.outcome } : {}),
-        };
-        if (clearMeta?.kind === "clear" && clearResult?.success && clearResult.txnHash) {
-          resolved.push({ ...base, clearHash: clearResult.txnHash });
-        } else {
-          resolved.push({
-            ...base,
-            clearError: clearResult?.error ?? "clear tx failed",
-          });
-        }
-      } else {
+      if (!r.success || !r.txnHash) {
         skipped.push({
           group: meta.groupId,
           reason: `${resolveMode}-resolve failed: ${r.error ?? "unknown"}`,
         });
+        continue;
       }
+
+      const clearMeta = payloadMeta[i + 1];
+      const clearResult = results[i + 1];
+      const clearPaired =
+        clearMeta?.kind === "clear" && clearMeta.groupId === meta.groupId;
+
+      const entry: (typeof resolved)[number] = {
+        group: meta.groupId,
+        caseId: meta.caseId.toString(),
+        mode: resolveMode as "oracle" | "admin",
+        resolveHash: r.txnHash,
+        dbUpdated: false,
+      };
+      if (clearPaired && clearResult?.success && clearResult.txnHash) {
+        entry.clearHash = clearResult.txnHash;
+      } else if (clearPaired) {
+        entry.clearError = clearResult?.error ?? "clear tx failed";
+      }
+
+      resolved.push(entry);
+
+      // DB sync — independent of clear outcome. For oracle mode, pull the
+      // authoritative outcome from the resolve tx events; for admin mode,
+      // we already have it locally.
+      const resolveTxHash = r.txnHash;
+      dbUpdateTasks.push(
+        (async () => {
+          let outcomeLabel: OutcomeLabel;
+          if (meta.kind === "admin-resolve") {
+            outcomeLabel = outcomeCodeToLabel(meta.outcome);
+            entry.outcome = outcomeLabel;
+          } else {
+            try {
+              const evt = await fetchResolvedEventForTxn(resolveTxHash);
+              if (evt) {
+                outcomeLabel = outcomeCodeToLabel(evt.outcome);
+              } else {
+                // Event missing (rare) — fall back to readCaseState.
+                const st = await readCaseState(meta.caseId);
+                outcomeLabel = outcomeCodeToLabel(st.resolvedOutcome);
+              }
+            } catch (err) {
+              console.error(
+                `[resolve-onchain] failed to read outcome for case ${meta.caseId}:`,
+                err,
+              );
+              return;
+            }
+            entry.outcome = outcomeLabel;
+          }
+          try {
+            entry.dbUpdated = await applyResolvedDbUpdate(
+              meta.caseId,
+              meta.groupId,
+              outcomeLabel,
+            );
+          } catch (err) {
+            console.error(
+              `[resolve-onchain] DB update failed for case ${meta.caseId}:`,
+              err,
+            );
+          }
+        })(),
+      );
     } else if (meta.kind === "clear") {
       const prev = payloadMeta[i - 1];
       const isPaired =
         (prev?.kind === "oracle-resolve" || prev?.kind === "admin-resolve") &&
         prev.groupId === meta.groupId;
-      if (!isPaired) {
-        if (r.success && r.txnHash) {
-          cleared.push({
-            group: meta.groupId,
-            caseId: meta.caseId.toString(),
-            txnHash: r.txnHash,
-          });
-        } else {
-          skipped.push({
-            group: meta.groupId,
-            reason: r.error ?? "clear-only tx failed",
-          });
-        }
+      if (isPaired) continue; // handled above
+
+      // clear-only entry — chain was already resolved; sync DB from the
+      // prep's cached outcomeCode regardless of clear tx success.
+      const prep = preps.find(
+        (p): p is Extract<GroupPrep, { kind: "clear-only" }> =>
+          p.kind === "clear-only" && p.caseId === meta.caseId,
+      );
+      const outcomeLabel: OutcomeLabel = prep
+        ? outcomeCodeToLabel(prep.outcomeCode)
+        : "INVALID";
+
+      const entry: (typeof cleared)[number] = {
+        group: meta.groupId,
+        caseId: meta.caseId.toString(),
+        dbUpdated: false,
+      };
+      if (r.success && r.txnHash) {
+        entry.txnHash = r.txnHash;
+      } else {
+        entry.clearError = r.error ?? "clear-only tx failed";
       }
+      cleared.push(entry);
+
+      dbUpdateTasks.push(
+        (async () => {
+          try {
+            entry.dbUpdated = await applyResolvedDbUpdate(
+              meta.caseId,
+              meta.groupId,
+              outcomeLabel,
+            );
+          } catch (err) {
+            console.error(
+              `[resolve-onchain] clear-only DB update failed for case ${meta.caseId}:`,
+              err,
+            );
+          }
+        })(),
+      );
     }
   }
+
+  await Promise.all(dbUpdateTasks);
 
   const nextCloseTime = closeTimes.length ? Math.min(...closeTimes) : null;
   return NextResponse.json({ mode, resolved, cleared, skipped, nextCloseTime });

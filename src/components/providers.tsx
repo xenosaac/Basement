@@ -11,31 +11,27 @@ const WalletProviders = dynamic(
   { ssr: false },
 );
 
-function pageNeedsWalletProvider(pathname: string | null) {
-  if (!pathname || pathname === "/") return false;
-  return (
-    pathname === "/markets" ||
-    pathname.startsWith("/portfolio") ||
-    /^\/markets\/[^/]+/.test(pathname)
-  );
-}
-
+/**
+ * v3: `<WalletProviders>` wraps unconditionally for all non-landing pages.
+ * Prior allow-list logic missed `/series/*` → `useAptosAuth` crashed.
+ * Also: only one `AptosWalletAdapterProvider` in the tree; navbar no longer
+ * creates its own (fixes state split between navbar + page).
+ */
 export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() => new QueryClient());
   const pathname = usePathname();
   const isLanding = pathname === "/";
-  const needsWalletProvider = pageNeedsWalletProvider(pathname);
 
   const page = (
     <>
-      {!isLanding && <Navbar withWalletProvider={!needsWalletProvider} />}
+      {!isLanding && <Navbar withWalletProvider={false} />}
       <main className="pt-20">{children}</main>
     </>
   );
 
   return (
     <QueryClientProvider client={queryClient}>
-      {needsWalletProvider ? <WalletProviders>{page}</WalletProviders> : page}
+      {isLanding ? page : <WalletProviders>{page}</WalletProviders>}
     </QueryClientProvider>
   );
 }

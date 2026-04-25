@@ -1,31 +1,37 @@
-import { and, asc, count, desc, eq, lt, sql, type SQL } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  isNull,
+  lt,
+  ne,
+  or,
+  sql,
+  type SQL,
+} from "drizzle-orm";
 import { db } from "@/db";
 import { markets } from "@/db/schema";
-import { calculatePrices } from "@/lib/amm";
-import { fetchPythPrice } from "@/lib/aptos";
+import {
+  aptos,
+  moduleAddress,
+  readCaseState,
+  type MarketCreatedEvent,
+} from "@/lib/aptos";
 import {
   activePythGroups,
-  deriveMarketParams,
   isActiveRecurringGroupId,
-  pythFeedForGroup,
+  renderQuestion,
   type MarketGroupSpec,
 } from "@/lib/market-groups";
-import type { MarketsResponse } from "@/types";
+import { settlementDisplayPrices } from "@/lib/market-settlement";
+import type { MarketWithPrices, MarketsResponse } from "@/types";
 
 const VALID_STATES: readonly string[] = ["OPEN", "CLOSED", "RESOLVED", "SETTLED"];
 // Registry-driven. Every active `pyth` group in market-groups.ts is covered
-// here; adding a new recurring market (e.g. sol-3m, xau-1h) only requires a
-// registry entry. Previously hardcoded to BTC+ETH with per-asset branches.
+// here; adding a new recurring market only requires a registry entry.
 const RECURRING_SPECS: readonly MarketGroupSpec[] = activePythGroups();
-// Fallback display prices when Pyth Hermes is unreachable. Used purely for
-// the DB row's strike_price column; the ON-CHAIN strike is set from Hermes
-// via the spawn-recurring cron and is independent of these values.
-const FALLBACK_PRICES: Record<string, number> = {
-  BTC: 85_000,
-  ETH: 2_000,
-  XAU: 4_700,
-};
-const DEFAULT_FALLBACK_PRICE = 100;
 const RECURRING_ENSURE_COOLDOWN_MS = 30_000;
 
 function humanAssetName(symbol: string): string {
@@ -61,82 +67,158 @@ export function parseMarketsSearchParams(searchParams: URLSearchParams): Markets
   };
 }
 
+/* ---------------------------------------------------------------------------
+ * Recurring market row materialization — always keyed by on-chain caseId.
+ *
+ * The canonical source of truth is `market_factory::MarketCreatedEvent`.
+ * This function writes/updates the DB row so `caseId` mirrors the chain, and
+ * closes any older OPEN row in the same group (prevents two-cards-one-group).
+ * ------------------------------------------------------------------------ */
+
+export interface UpsertRecurringInput {
+  spec: MarketGroupSpec;
+  event: MarketCreatedEvent;
+  state?: "OPEN" | "CLOSED";
+}
+
+export async function upsertRecurringMarketRowFromChain({
+  spec,
+  event,
+  state = "OPEN",
+}: UpsertRecurringInput): Promise<void> {
+  const closeTimeSec = Number(event.closeTime);
+  const question = renderQuestion(spec, event.strikePrice, closeTimeSec);
+  const assetName = humanAssetName(spec.assetSymbol);
+  const strikeDisplay = Number(event.strikePrice) * Math.pow(10, spec.priceExpo);
+  const description = `Resolves YES if ${assetName} price at close is higher than at open. Price sourced from Pyth.`;
+  const slug = `${spec.groupId}-${event.caseId.toString()}`;
+
+  // Close any older OPEN row in the same group that isn't this caseId. Safety
+  // net — normally there shouldn't be one, but we don't want two OPEN rows.
+  await db
+    .update(markets)
+    .set({ state: "CLOSED" })
+    .where(
+      and(
+        eq(markets.recurringGroupId, spec.groupId),
+        eq(markets.state, "OPEN"),
+        or(isNull(markets.caseId), ne(markets.caseId, event.caseId)),
+      ),
+    );
+
+  await db
+    .insert(markets)
+    .values({
+      slug,
+      question,
+      description,
+      state,
+      marketType: "RECURRING",
+      asset: spec.assetSymbol,
+      strikePrice: String(strikeDisplay),
+      recurringGroupId: spec.groupId,
+      yesDemand: "1",
+      noDemand: "1",
+      yesPrice: "0.5",
+      noPrice: "0.5",
+      totalVolume: "0",
+      closeTime: new Date(closeTimeSec * 1000),
+      caseId: event.caseId,
+      marketObjectAddress: event.vaultAddr,
+      oracleFeedId: event.assetPythFeedId || null,
+    })
+    .onConflictDoUpdate({
+      target: markets.caseId,
+      set: {
+        slug,
+        question,
+        description,
+        state,
+        marketType: "RECURRING",
+        asset: spec.assetSymbol,
+        strikePrice: String(strikeDisplay),
+        recurringGroupId: spec.groupId,
+        closeTime: new Date(closeTimeSec * 1000),
+        marketObjectAddress: event.vaultAddr,
+        oracleFeedId: event.assetPythFeedId || null,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+/* Reconcile DB with on-chain active cases for each known group.
+ *
+ * Strategy:
+ *   - view `get_active_market_in_group(groupId)` for each active registry
+ *     group.
+ *   - If the group has an active case on-chain, readCaseState and upsert a
+ *     chain-authoritative DB row.
+ *   - If no active case, do NOT create a placeholder DB row; the spawn cron
+ *     creates one and this reconciler picks it up on the next cycle.
+ *
+ * Never writes a RECURRING row with caseId == null. */
 async function ensureActiveRecurringMarkets(): Promise<void> {
   const now = new Date();
   const nowSec = Math.floor(now.getTime() / 1000);
 
   await Promise.all(
     RECURRING_SPECS.map(async (spec) => {
-      const { groupId, assetSymbol } = spec;
       try {
+        // Close expired OPEN rows in this group (regardless of caseId).
         await db
           .update(markets)
           .set({ state: "CLOSED" })
           .where(
             and(
-              eq(markets.recurringGroupId, groupId),
+              eq(markets.recurringGroupId, spec.groupId),
               eq(markets.state, "OPEN"),
-              lt(markets.closeTime, now)
-            )
+              lt(markets.closeTime, now),
+            ),
           );
 
-        const openInGroup = await db
-          .select({ id: markets.id })
-          .from(markets)
-          .where(and(eq(markets.recurringGroupId, groupId), eq(markets.state, "OPEN")))
-          .limit(1);
-
-        if (openInGroup.length > 0) return;
-
-        // Pull the current price from Pyth Hermes and run it through the SAME
-        // deriveMarketParams that the spawn cron uses. Guarantees the DB
-        // row's strike / closeTime / question match what the on-chain
-        // create_market (or spawn_recurring_3min) call will produce.
-        const feedId = pythFeedForGroup(spec);
-        let priceRaw: bigint;
-        let priceExpo: number;
-        let derivedFromPyth = true;
-        try {
-          const { price, expo } = await fetchPythPrice(feedId);
-          priceRaw = price;
-          priceExpo = expo;
-        } catch {
-          // Fallback: synthesise a raw price from our hardcoded display
-          // fallback table at the spec's declared expo.
-          const fallback =
-            FALLBACK_PRICES[assetSymbol] ?? DEFAULT_FALLBACK_PRICE;
-          priceExpo = spec.priceExpo;
-          priceRaw = BigInt(
-            Math.round(fallback * Math.pow(10, -spec.priceExpo)),
-          );
-          derivedFromPyth = false;
+        const groupBytes = Array.from(new TextEncoder().encode(spec.groupId));
+        const view = (await aptos.view({
+          payload: {
+            function: `${moduleAddress()}::market_factory::get_active_market_in_group`,
+            typeArguments: [],
+            functionArguments: [groupBytes],
+          },
+        })) as [{ vec?: unknown[] }];
+        const vec = view[0]?.vec;
+        if (!Array.isArray(vec) || vec.length === 0) {
+          // No active on-chain case → spawn cron will create one. Do not
+          // insert a caseId=null placeholder.
+          return;
         }
-        void derivedFromPyth; // reserved for future log line
-        const derived = deriveMarketParams(spec, priceRaw, priceExpo, nowSec);
 
-        const initialPrices = calculatePrices(1, 1);
-        const assetName = humanAssetName(assetSymbol);
+        const caseId = BigInt(vec[0] as string);
+        const state = await readCaseState(caseId);
 
-        await db.insert(markets).values({
-          slug: `recurring-${groupId}-${now.getTime()}`,
-          question: derived.question,
-          description: `Resolves YES if ${assetName} price at close is higher than at open. Price sourced from Pyth.`,
-          state: "OPEN",
-          marketType: "RECURRING",
-          asset: assetSymbol,
-          strikePrice: String(derived.strikeDisplay),
-          recurringGroupId: groupId,
-          yesDemand: "1",
-          noDemand: "1",
-          yesPrice: String(initialPrices.yesPrice),
-          noPrice: String(initialPrices.noPrice),
-          totalVolume: "0",
-          closeTime: new Date(derived.closeTime * 1000),
+        // Skip if the chain already resolved/drained — no need to resurrect.
+        if (state.state !== 0 && state.state !== 1) return;
+        const dbState =
+          state.state === 0 && Number(state.closeTime) > nowSec ? "OPEN" : "CLOSED";
+
+        const syntheticEvent: MarketCreatedEvent = {
+          caseId,
+          vaultAddr: state.vaultAddress,
+          assetPythFeedId: state.assetPythFeedId,
+          strikePrice: state.strikePrice,
+          closeTime: state.closeTime,
+          marketType: state.marketType,
+          thresholdType: state.thresholdType,
+          recurringGroupId: state.recurringGroupId,
+        };
+
+        await upsertRecurringMarketRowFromChain({
+          spec,
+          event: syntheticEvent,
+          state: dbState,
         });
       } catch (err) {
-        console.error(`[auto-refresh] Failed to refresh ${groupId}:`, err);
+        console.error(`[auto-refresh] Failed to reconcile ${spec.groupId}:`, err);
       }
-    })
+    }),
   );
 }
 
@@ -158,6 +240,84 @@ export function scheduleActiveRecurringMarketsEnsure() {
       recurringEnsureInFlight = null;
     });
 }
+
+/* ---------------------------------------------------------------------------
+ * Row → API shape + settlement display.
+ * ------------------------------------------------------------------------ */
+
+type MarketRow = {
+  id: string;
+  question: string;
+  description: string;
+  imageUrl: string | null;
+  state: "OPEN" | "CLOSED" | "RESOLVED" | "SETTLED";
+  yesPrice: string;
+  noPrice: string;
+  yesDemand: string;
+  noDemand: string;
+  closeTime: Date | null;
+  resolvedOutcome: string | null;
+  slug: string;
+  totalVolume: string;
+  marketType: "MIRRORED" | "RECURRING";
+  asset: string | null;
+  strikePrice: string | null;
+  recurringGroupId: string | null;
+  caseId: bigint | null;
+};
+
+export function toMarketWithPrices(row: MarketRow): MarketWithPrices {
+  const fallback = {
+    yesPrice: Number(row.yesPrice),
+    noPrice: Number(row.noPrice),
+  };
+  const { yesPrice, noPrice } = settlementDisplayPrices(
+    row.state,
+    row.resolvedOutcome,
+    fallback,
+  );
+  return {
+    id: row.id,
+    question: row.question,
+    description: row.description,
+    imageUrl: row.imageUrl,
+    state: row.state,
+    yesPrice,
+    noPrice,
+    yesDemand: Number(row.yesDemand),
+    noDemand: Number(row.noDemand),
+    closeTime: row.closeTime?.toISOString() ?? null,
+    resolvedOutcome: row.resolvedOutcome,
+    slug: row.slug,
+    totalVolume: Number(row.totalVolume),
+    marketType: row.marketType,
+    asset: row.asset,
+    strikePrice: row.strikePrice ? Number(row.strikePrice) : null,
+    recurringGroupId: row.recurringGroupId,
+    caseId: row.caseId != null ? row.caseId.toString() : null,
+  };
+}
+
+const MARKET_SELECT = {
+  id: markets.id,
+  question: markets.question,
+  description: markets.description,
+  imageUrl: markets.imageUrl,
+  state: markets.state,
+  yesPrice: markets.yesPrice,
+  noPrice: markets.noPrice,
+  yesDemand: markets.yesDemand,
+  noDemand: markets.noDemand,
+  closeTime: markets.closeTime,
+  resolvedOutcome: markets.resolvedOutcome,
+  slug: markets.slug,
+  totalVolume: markets.totalVolume,
+  marketType: markets.marketType,
+  asset: markets.asset,
+  strikePrice: markets.strikePrice,
+  recurringGroupId: markets.recurringGroupId,
+  caseId: markets.caseId,
+} as const;
 
 export async function getMarketsList(params: MarketsQueryParams = {}): Promise<MarketsResponse> {
   const stateParam = params.state?.toUpperCase();
@@ -195,25 +355,7 @@ export async function getMarketsList(params: MarketsQueryParams = {}): Promise<M
 
   const [rows, [{ total }]] = await Promise.all([
     db
-      .select({
-        id: markets.id,
-        question: markets.question,
-        description: markets.description,
-        imageUrl: markets.imageUrl,
-        state: markets.state,
-        yesPrice: markets.yesPrice,
-        noPrice: markets.noPrice,
-        yesDemand: markets.yesDemand,
-        noDemand: markets.noDemand,
-        closeTime: markets.closeTime,
-        resolvedOutcome: markets.resolvedOutcome,
-        slug: markets.slug,
-        totalVolume: markets.totalVolume,
-        marketType: markets.marketType,
-        asset: markets.asset,
-        strikePrice: markets.strikePrice,
-        recurringGroupId: markets.recurringGroupId,
-      })
+      .select(MARKET_SELECT)
       .from(markets)
       .where(where)
       .orderBy(orderBy)
@@ -223,9 +365,7 @@ export async function getMarketsList(params: MarketsQueryParams = {}): Promise<M
   ]);
 
   // Drop recurring rows whose group id is no longer in the active registry
-  // (e.g. legacy btc-15m / eth-15m from pre-3m cadence). Those rows may
-  // linger in the DB with state=OPEN; the UI market-grid already hides
-  // them client-side, but the API should return a clean view too.
+  // (e.g. legacy btc-15m / eth-15m from pre-3m cadence).
   const cleanRows = rows.filter(
     (r) =>
       r.marketType !== "RECURRING" ||
@@ -234,18 +374,19 @@ export async function getMarketsList(params: MarketsQueryParams = {}): Promise<M
   );
 
   return {
-    markets: cleanRows.map((market) => ({
-      ...market,
-      yesPrice: Number(market.yesPrice),
-      noPrice: Number(market.noPrice),
-      yesDemand: Number(market.yesDemand),
-      noDemand: Number(market.noDemand),
-      totalVolume: Number(market.totalVolume),
-      strikePrice: market.strikePrice ? Number(market.strikePrice) : null,
-      closeTime: market.closeTime?.toISOString() ?? null,
-    })),
+    markets: cleanRows.map((row) => toMarketWithPrices(row as MarketRow)),
     total: cleanRows.length === rows.length ? total : cleanRows.length,
     limit: limitParam,
     offset: offsetParam,
   };
+}
+
+export async function getMarketById(id: string): Promise<MarketWithPrices | null> {
+  const [row] = await db
+    .select(MARKET_SELECT)
+    .from(markets)
+    .where(eq(markets.id, id))
+    .limit(1);
+  if (!row) return null;
+  return toMarketWithPrices(row as MarketRow);
 }

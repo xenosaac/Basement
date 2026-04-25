@@ -16,6 +16,7 @@ export interface MarketWithPrices {
   asset?: string | null;
   strikePrice?: number | null;
   recurringGroupId?: string | null;
+  caseId?: string | null;
 }
 
 export interface MarketsResponse {
@@ -23,4 +24,11 @@ export interface MarketsResponse {
   total: number;
   limit: number;
   offset: number;
+}
+
+export interface LeaderboardEntry {
+  rank: number;
+  address: string;
+  profit: number;
+  tradeCount: number;
 }

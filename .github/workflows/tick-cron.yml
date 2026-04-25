@@ -1,0 +1,37 @@
+name: Basement v3 tick cron
+
+# Fires /api/cron/tick against the Vercel preview URL every minute.
+# For 30s cadence, uncomment the second hit in the job (sleeps 30s then hits again).
+#
+# Required secrets (set in repo settings → Actions):
+#   VERCEL_PREVIEW_URL  - e.g. https://basement-xxx.vercel.app
+#   CRON_SECRET         - must match process.env.CRON_SECRET on Vercel
+
+on:
+  schedule:
+    - cron: "* * * * *" # every minute
+  workflow_dispatch:
+
+concurrency:
+  group: basement-tick
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Hit /api/cron/tick (t=0)
+        run: |
+          curl -sS --max-time 30 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.VERCEL_PREVIEW_URL }}/api/cron/tick" \
+            | head -c 2048
+
+      - name: Sleep 30s then tick again for sub-minute cadence
+        run: |
+          sleep 30
+          curl -sS --max-time 30 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.VERCEL_PREVIEW_URL }}/api/cron/tick" \
+            | head -c 2048

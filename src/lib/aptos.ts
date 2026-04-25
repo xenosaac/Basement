@@ -62,7 +62,14 @@ function resolveNetwork(n?: string): Network {
 
 const _aptosCache = new Map<Network, Aptos>();
 
-/** Return (memoized) an Aptos client bound to the requested network. */
+/** Return (memoized) an Aptos client bound to the requested network.
+ *
+ * Reads `APTOS_API_KEY` at call time — when set, every RPC carries an
+ * `Authorization: Bearer <key>` header so our quota runs against the
+ * account tied to that key instead of the per-anon-IP rate limit
+ * (40k CU / 300s) that throttles testnet traffic. No key → falls back
+ * to anon (only suitable for low-traffic dev).
+ */
 export function getAptos(network?: AptosNetwork | Network): Aptos {
   const net =
     typeof network === "string" || network === undefined
@@ -71,7 +78,9 @@ export function getAptos(network?: AptosNetwork | Network): Aptos {
   const cached = _aptosCache.get(net);
   if (cached) return cached;
   const fullnode = process.env.APTOS_FULLNODE_URL || undefined;
-  const cfg = new AptosConfig({ network: net, fullnode });
+  const apiKey = process.env.APTOS_API_KEY?.trim();
+  const clientConfig = apiKey ? { API_KEY: apiKey } : undefined;
+  const cfg = new AptosConfig({ network: net, fullnode, clientConfig });
   const client = new Aptos(cfg);
   _aptosCache.set(net, client);
   return client;
@@ -86,34 +95,9 @@ export const aptos: Aptos = getAptos();
 
 const STUB = "0x_STUB_REPLACE_IN_SESSION_B"; // retained as sentinel for env-not-overridden check
 
-/** Throw a helpful error naming the env var if it is unset or still a stub. */
-function requireEnv(name: string, publicName?: string, allowStub = false): string {
-  let raw = process.env[name];
-  if (!raw || raw.trim() === "") {
-    if (publicName) {
-      raw = process.env[publicName];
-    }
-  }
-  if (!raw || raw.trim() === "") {
-    const label = publicName ? `${name} (or ${publicName})` : name;
-    throw new Error(
-      `[aptos.ts] Required env var ${label} is not set. ` +
-        `Add it to .env (see .env.example). Filled in Session C (2026-04-22 testnet deploy).`,
-    );
-  }
-  if (!allowStub && raw === STUB) {
-    const label = publicName ? `${name}/${publicName}` : name;
-    throw new Error(
-      `[aptos.ts] Env var ${label} is still a stub "${STUB}". ` +
-        `Session C provided real testnet values; ensure .env is loaded.`,
-    );
-  }
-  return raw;
-}
-
 /**
  * Client-exposed env getters below use explicit static `process.env.FOO`
- * accesses (not dynamic bracket lookup via {@link requireEnv}) because
+ * accesses instead of dynamic bracket lookup because
  * Next.js only inlines `NEXT_PUBLIC_*` vars into the browser bundle when
  * the property name is a string literal. A dynamic `process.env[name]`
  * reads undefined in the browser even if the var is set in .env.
@@ -290,12 +274,23 @@ export interface CaseCreatedEvent {
   strikePrice: bigint;
   closeTime: bigint;
 }
+// Canonical shape matching move/basement/sources/market_factory.move L77-86.
+// `market_factory::MarketCreatedEvent` carries all fields needed to
+// materialize a RECURRING DB row from the spawn tx.
 export interface MarketCreatedEvent {
-  groupId: bigint;
-  feedId: string;
-  tickSize: bigint;
-  poolDepth: bigint;
-  timestamp: bigint;
+  caseId: bigint;
+  vaultAddr: Address;
+  assetPythFeedId: string;               // 0x-prefixed hex of vector<u8>
+  strikePrice: bigint;
+  closeTime: bigint;                     // unix seconds
+  marketType: number;                    // u8
+  thresholdType: number;                 // u8
+  recurringGroupId: string | null;       // decoded from Option<vector<u8>>; utf8 if printable, else hex
+}
+
+export interface ResolvedEventData {
+  caseId: bigint;
+  outcome: 0 | 1 | 2;                    // 0=YES, 1=NO, 2=INVALID
 }
 
 /** Result shape of simulate* helpers. */
@@ -529,6 +524,88 @@ export async function readUserNoFa(
     );
   }
   return faBalance(addr, state.noMetadata, client);
+}
+
+/* ---------------------------------------------------------------------------
+ * Tx-event fetchers — parse `market_factory::MarketCreatedEvent` and
+ * `case_vault::ResolvedEvent` from a committed transaction. Used by
+ * spawn-recurring / resolve-onchain cron to materialize DB state from
+ * authoritative on-chain events.
+ * ------------------------------------------------------------------------ */
+
+function decodeOptionBytes(value: unknown): string | null {
+  // Move `Option<vector<u8>>` serializes to `{ vec: ["0x..."] }` (some) or
+  // `{ vec: [] }` (none) in JSON. Raw vectors can also arrive as hex strings
+  // directly on older nodes.
+  if (value == null) return null;
+  if (typeof value === "string") return decodeVectorU8Bytes(value);
+  if (typeof value === "object") {
+    const vec = (value as { vec?: unknown }).vec;
+    if (Array.isArray(vec) && vec.length > 0 && typeof vec[0] === "string") {
+      return decodeVectorU8Bytes(vec[0]);
+    }
+    return null;
+  }
+  return null;
+}
+
+function decodeVectorU8Bytes(hex: string): string | null {
+  if (!hex) return null;
+  try {
+    const bytes = fromHex(hex);
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    // Only treat as UTF-8 string if fully printable ASCII/UTF-8; otherwise
+    // keep hex so callers can still compare.
+    if (/^[\x20-\x7E]+$/.test(text)) return text;
+    return hex.toLowerCase();
+  } catch {
+    return hex.toLowerCase();
+  }
+}
+
+export async function fetchMarketCreatedEventsForTxn(
+  txnHash: string,
+  client: Aptos = aptos,
+): Promise<MarketCreatedEvent[]> {
+  const matchType = `${moduleAddress()}::market_factory::MarketCreatedEvent`;
+  const txn = await client.getTransactionByHash({ transactionHash: txnHash });
+  const events = (txn as { events?: Array<{ type: string; data: unknown }> }).events ?? [];
+  const out: MarketCreatedEvent[] = [];
+  for (const ev of events) {
+    if (ev.type !== matchType) continue;
+    const d = ev.data as Record<string, unknown>;
+    out.push({
+      caseId: BigInt(d.case_id as string | number),
+      vaultAddr: String(d.vault_addr),
+      assetPythFeedId: String(d.asset_pyth_feed_id ?? ""),
+      strikePrice: BigInt(d.strike_price as string | number),
+      closeTime: BigInt(d.close_time as string | number),
+      marketType: Number(d.market_type ?? 0),
+      thresholdType: Number(d.threshold_type ?? 0),
+      recurringGroupId: decodeOptionBytes(d.recurring_group_id),
+    });
+  }
+  return out;
+}
+
+export async function fetchResolvedEventForTxn(
+  txnHash: string,
+  client: Aptos = aptos,
+): Promise<ResolvedEventData | null> {
+  const matchType = `${moduleAddress()}::case_vault::ResolvedEvent`;
+  const txn = await client.getTransactionByHash({ transactionHash: txnHash });
+  const events = (txn as { events?: Array<{ type: string; data: unknown }> }).events ?? [];
+  for (const ev of events) {
+    if (ev.type !== matchType) continue;
+    const d = ev.data as Record<string, unknown>;
+    const raw = Number(d.outcome ?? 0);
+    const outcome = (raw === 0 ? 0 : raw === 1 ? 1 : 2) as 0 | 1 | 2;
+    return {
+      caseId: BigInt(d.case_id as string | number),
+      outcome,
+    };
+  }
+  return null;
 }
 
 /* ---------------------------------------------------------------------------
@@ -885,6 +962,52 @@ function base64ToBytes(b64: string): Uint8Array {
   return bytes;
 }
 
+/** Admin gas budget. Aptos validator pre-reserves
+ * `maxGasAmount × gasUnitPrice` from the sender's balance, so leaving it
+ * at the SDK default (200k) would need 0.2 APT per submit — painful when
+ * testnet faucet rations 1 APT/day.
+ *
+ * These ceilings are ~2× headroom over observed actuals (measured via
+ * `/v1/accounts/:addr/transactions`):
+ *   - resolve_oracle          ~955 units
+ *   - clear_active_group      ~51 units
+ *   - spawn_recurring_3min    ~52,138 units (create CaseVault + seed_liquidity)
+ *
+ * If a tx hits the ceiling it aborts OUT_OF_GAS — lift the specific
+ * builder rather than raising globally.
+ */
+const ADMIN_MAX_GAS = {
+  RESOLVE_ORACLE: 10_000,
+  ADMIN_RESOLVE: 5_000,
+  ADMIN_PAUSE: 5_000,
+  CLEAR_ACTIVE_GROUP: 5_000,
+  SPAWN_RECURRING_3MIN: 120_000, // 2x headroom over measured 52k
+  CREATE_MARKET: 120_000,
+} as const;
+
+/**
+ * Admin gas price. Testnet validators accept 1 octa/unit (network estimate
+ * is 100 but `deprioritized_gas_estimate` floor is effectively 0). Setting
+ * 1 reduces cron burn 100× vs SDK default (100).
+ *
+ * Guarded by `APTOS_NETWORK`: mainnet has a market-based minimum and would
+ * reject `gasUnitPrice: 1`, so keep the SDK default there.
+ *
+ * User-signed txns (Petra/OKX buy/sell/claim) are unaffected — wallets set
+ * their own price. This only applies to admin cron txns.
+ */
+function adminGasUnitPrice(): number | undefined {
+  const net = (process.env.APTOS_NETWORK ?? "testnet").toLowerCase();
+  return net === "testnet" || net === "devnet" ? 1 : undefined;
+}
+
+function adminOptions(maxGasAmount: number) {
+  const gasUnitPrice = adminGasUnitPrice();
+  return gasUnitPrice !== undefined
+    ? { maxGasAmount, gasUnitPrice }
+    : { maxGasAmount };
+}
+
 /** Build resolve-with-oracle txn (admin / cron). */
 export function buildResolveOracleTxn(
   caseId: CaseId,
@@ -896,6 +1019,7 @@ export function buildResolveOracleTxn(
       typeArguments: [],
       functionArguments: [caseId.toString(), Array.from(vaaBytes)],
     },
+    options: adminOptions(ADMIN_MAX_GAS.RESOLVE_ORACLE),
   };
 }
 
@@ -913,6 +1037,7 @@ export function buildAdminResolveTxn(
       typeArguments: [],
       functionArguments: [caseId.toString(), outcome],
     },
+    options: adminOptions(ADMIN_MAX_GAS.ADMIN_RESOLVE),
   };
 }
 
@@ -924,6 +1049,7 @@ export function buildAdminPauseTxn(caseId: CaseId): InputTransactionData {
       typeArguments: [],
       functionArguments: [caseId.toString()],
     },
+    options: adminOptions(ADMIN_MAX_GAS.ADMIN_PAUSE),
   };
 }
 
@@ -940,6 +1066,7 @@ export function buildClearActiveGroupTxn(groupId: string): InputTransactionData 
       typeArguments: [],
       functionArguments: [groupBytes],
     },
+    options: adminOptions(ADMIN_MAX_GAS.CLEAR_ACTIVE_GROUP),
   };
 }
 
@@ -969,6 +1096,7 @@ export function buildSpawnRecurring3minTxn(
         poolDepth.toString(),
       ],
     },
+    options: adminOptions(ADMIN_MAX_GAS.SPAWN_RECURRING_3MIN),
   };
 }
 
@@ -1035,6 +1163,7 @@ export function buildCreateMarketTxn(
         metadataHash, // metadata_hash: vector<u8>
       ],
     },
+    options: adminOptions(ADMIN_MAX_GAS.CREATE_MARKET),
   };
 }
 
@@ -1069,7 +1198,15 @@ export async function submitAdminTxn(
   const transaction = await aptos.transaction.build.simple({
     sender: signer.accountAddress,
     data: payload.data as InputEntryFunctionData,
-    options: { expireTimestamp: Math.floor(Date.now() / 1000) + 60 },
+    options: {
+      expireTimestamp: Math.floor(Date.now() / 1000) + 60,
+      ...(payload.options?.maxGasAmount !== undefined
+        ? { maxGasAmount: payload.options.maxGasAmount }
+        : {}),
+      ...(payload.options?.gasUnitPrice !== undefined
+        ? { gasUnitPrice: payload.options.gasUnitPrice }
+        : {}),
+    },
   });
   const pending = await aptos.signAndSubmitTransaction({ signer, transaction });
   const result = await aptos.waitForTransaction({
@@ -1123,6 +1260,16 @@ export async function submitAdminTxnsParallel(
         options: {
           accountSequenceNumber: baseSeq + BigInt(i),
           expireTimestamp: expireAt,
+          // Per-builder gas budget override (e.g. ADMIN_MAX_GAS.*).
+          // Without this, the SDK defaults maxGasAmount to 200k which
+          // pre-reserves 0.2 APT per tx and bricks the admin wallet on a
+          // rationed testnet faucet.
+          ...(payload.options?.maxGasAmount !== undefined
+            ? { maxGasAmount: payload.options.maxGasAmount }
+            : {}),
+          ...(payload.options?.gasUnitPrice !== undefined
+            ? { gasUnitPrice: payload.options.gasUnitPrice }
+            : {}),
         },
       }),
     ),

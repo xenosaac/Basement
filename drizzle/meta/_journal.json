@@ -15,6 +15,48 @@
       "when": 1776889513283,
       "tag": "0001_past_doorman",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1776996674459,
+      "tag": "0002_dizzy_red_skull",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1777015328814,
+      "tag": "0003_smooth_stature",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1777070437989,
+      "tag": "0004_strange_tinkerer",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1777081301101,
+      "tag": "0005_cheerful_bishop",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1777081565383,
+      "tag": "0006_normal_arclight",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1777085484135,
+      "tag": "0007_steep_tattoo",
+      "breakpoints": true
     }
   ]
 }

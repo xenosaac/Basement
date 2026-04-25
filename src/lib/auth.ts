@@ -35,9 +35,7 @@ interface NonceRecord {
 }
 
 declare global {
-  // eslint-disable-next-line no-var
   var __basementAptosNonceStore: Map<string, NonceRecord> | undefined;
-  // eslint-disable-next-line no-var
   var __basementAptosNonceSweepCounter: number | undefined;
 }
 

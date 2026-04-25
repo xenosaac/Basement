@@ -9,7 +9,6 @@ import { runIndexerPass } from "../src/lib/vault-indexer";
 
 async function main(): Promise<void> {
   let round = 0;
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     round++;
     const start = Date.now();

@@ -9,6 +9,7 @@ import {
   aptos,
   buildCreateMarketTxn,
   buildSpawnRecurring3minTxn,
+  fetchMarketCreatedEventsForTxn,
   fetchPythPrice,
   getPythVAA,
   moduleAddress,
@@ -22,7 +23,9 @@ import {
   deriveMarketParams,
   isMarketOpen,
   pythFeedForGroup,
+  type MarketGroupSpec,
 } from "@/lib/market-groups";
+import { upsertRecurringMarketRowFromChain } from "@/lib/markets-query";
 
 /**
  * Parse a Pyth Hermes VAA and extract the current price (signed i64 scaled
@@ -84,6 +87,7 @@ export async function GET(req: Request): Promise<Response> {
         kind: "ready";
         payload: InputTransactionData;
         durationSec: number;
+        spec: MarketGroupSpec;
       };
 
   const nowUtcSec = Math.floor(Date.now() / 1000);
@@ -147,6 +151,7 @@ export async function GET(req: Request): Promise<Response> {
               group.poolDepth,
             ),
             durationSec: 180,
+            spec: group,
           };
         }
 
@@ -171,6 +176,7 @@ export async function GET(req: Request): Promise<Response> {
             maxStalenessSec: strategy.maxStalenessSec,
           }),
           durationSec: derived.durationSec,
+          spec: group,
         };
       } catch (err) {
         return {
@@ -190,7 +196,12 @@ export async function GET(req: Request): Promise<Response> {
     readyPreps.map((p) => p.payload),
   );
 
-  const spawned: Array<{ group: string; txnHash: string }> = [];
+  const spawned: Array<{
+    group: string;
+    txnHash: string;
+    caseId: string | null;
+    dbWritten: boolean;
+  }> = [];
   const skipped: Array<{ group: string; reason: string }> = [];
   const closeTimes: number[] = [];
 
@@ -200,18 +211,53 @@ export async function GET(req: Request): Promise<Response> {
       if (typeof p.nextCloseTime === "number") closeTimes.push(p.nextCloseTime);
     }
   }
-  readyPreps.forEach((p, i) => {
-    const r = results[i];
-    if (r.success && r.txnHash) {
-      spawned.push({ group: p.groupId, txnHash: r.txnHash });
-      closeTimes.push(Math.floor(Date.now() / 1000) + p.durationSec);
-    } else {
-      skipped.push({
+
+  // For successful spawns, parse `market_factory::MarketCreatedEvent` from
+  // the committed tx and materialize the DB row keyed by on-chain caseId.
+  // On event-fetch miss, log + skip; `ensureActiveRecurringMarkets` will
+  // reconcile via view + readCaseState on the next `/api/markets` hit.
+  await Promise.all(
+    readyPreps.map(async (p, i) => {
+      const r = results[i];
+      if (!r.success || !r.txnHash) {
+        skipped.push({
+          group: p.groupId,
+          reason: r.error ?? "spawn tx failed",
+        });
+        return;
+      }
+
+      let caseId: string | null = null;
+      let dbWritten = false;
+      try {
+        const events = await fetchMarketCreatedEventsForTxn(r.txnHash);
+        const event =
+          events.find((e) => e.recurringGroupId === p.spec.groupId) ?? events[0];
+        if (event) {
+          caseId = event.caseId.toString();
+          await upsertRecurringMarketRowFromChain({ spec: p.spec, event });
+          dbWritten = true;
+        } else {
+          console.warn(
+            `[spawn-recurring] MarketCreatedEvent missing for ${p.groupId} txn=${r.txnHash}`,
+          );
+        }
+      } catch (err) {
+        console.error(
+          `[spawn-recurring] event/upsert failed for ${p.groupId}:`,
+          err,
+        );
+      }
+
+      spawned.push({
         group: p.groupId,
-        reason: r.error ?? "spawn tx failed",
+        txnHash: r.txnHash,
+        caseId,
+        dbWritten,
       });
-    }
-  });
+      closeTimes.push(Math.floor(Date.now() / 1000) + p.durationSec);
+    }),
+  );
 
   const nextCloseTime = closeTimes.length ? Math.min(...closeTimes) : null;
   return NextResponse.json({ spawned, skipped, nextCloseTime });

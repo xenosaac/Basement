@@ -23,6 +23,7 @@ export interface TradeArgs {
 
 export interface TradeResultOnChain {
   txnHash: string;
+  caseId: string;
   side: "YES" | "NO";
   direction: "BUY" | "SELL";
 }
@@ -64,7 +65,33 @@ export function useTrade(groupId: string | null) {
         transactionHash: pending.hash,
         options: { timeoutSecs: 30 },
       });
-      return { txnHash: pending.hash, side, direction };
+
+      // Hint the server that this wallet has positioned in this caseId, so
+      // `/api/portfolio/cases` can surface it before the vault indexer
+      // catches up. Awaited here (not fire-and-forget) so the `onSuccess`
+      // invalidation below sees the hint already in the DB.
+      try {
+        await fetch("/api/portfolio/hints", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            caseId: caseId.toString(),
+            txnHash: pending.hash,
+          }),
+          credentials: "include",
+        });
+      } catch (err) {
+        // Hint failure must not override tx-success semantics; the vault
+        // indexer will eventually discover this case anyway.
+        console.warn("portfolio hint post failed", err);
+      }
+
+      return {
+        txnHash: pending.hash,
+        caseId: caseId.toString(),
+        side,
+        direction,
+      };
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: portfolioOnChainQueryKey(address) });

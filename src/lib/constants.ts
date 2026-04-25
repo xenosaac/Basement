@@ -2,6 +2,15 @@ export const FAUCET_AMOUNT = 50;
 export const FAUCET_COOLDOWN_SECONDS = 86400;
 export const AMM_SMOOTHING_K = 1;
 export const INITIAL_DEMAND = 1;
+
+/**
+ * pm-AMM liquidity parameter L (dollars). Paradigm's static pm-AMM uses L
+ * as the scaling parameter in the invariant
+ *   (y-x)·Φ((y-x)/L) + L·φ((y-x)/L) - y = 0
+ * Larger L = deeper liquidity, smaller price impact per trade, larger
+ * initial reserves (x₀ = y₀ = L/√(2π)). Tune via env for deeper feel.
+ */
+export const PM_AMM_L_DOLLARS = Number(process.env.PM_AMM_L_DOLLARS ?? 100);
 export const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "";
 export const CRON_SECRET = process.env.CRON_SECRET ?? "";
 

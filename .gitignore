@@ -12,8 +12,8 @@
 
 # next.js
 /.next
-/.next-dev
-/.next-prod
+/.next-dev*
+/.next-prod*
 /.next.nosync
 /.next-dev.nosync
 /out/

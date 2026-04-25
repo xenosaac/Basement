@@ -1,0 +1,1 @@
+ALTER TABLE "positions_v3" ADD COLUMN "claimed_at" timestamp with time zone;
