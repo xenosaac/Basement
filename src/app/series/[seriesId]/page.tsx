@@ -272,6 +272,27 @@ export default function SeriesDetailPage() {
                 </div>
               </div>
             </div>
+            {/* Absolute-price summary: Spot · Strike · Δ to trigger.
+                No percentages — visual-language memory bans derived %, only
+                native-unit prices. Δ uses |spot − strike| in USD. */}
+            {series.currentPriceCents != null && series.currentStrikeCents != null && (
+              <div className="text-[11px] uppercase tracking-[2px] text-white/40 mb-4 font-mono tabular-nums">
+                Spot {centsToUsd(series.currentPriceCents)}
+                <span className="text-white/20"> · </span>
+                Strike {centsToUsd(series.currentStrikeCents)}
+                <span className="text-white/20"> · </span>
+                Δ {centsToUsd(
+                  (
+                    (BigInt(series.currentPriceCents) >
+                    BigInt(series.currentStrikeCents)
+                      ? BigInt(series.currentPriceCents) -
+                        BigInt(series.currentStrikeCents)
+                      : BigInt(series.currentStrikeCents) -
+                        BigInt(series.currentPriceCents))
+                  ).toString(),
+                )} to trigger
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-4">
               <div className="rounded-md bg-yes-dim border border-yes-border p-4 text-center">
                 <div className="text-[10px] uppercase tracking-[2px] text-yes mb-1">

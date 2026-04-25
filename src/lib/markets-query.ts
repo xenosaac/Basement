@@ -394,6 +394,9 @@ type MarketRow = {
   strikePrice: string | null;
   recurringGroupId: string | null;
   caseId: bigint | null;
+  /** LEFT JOIN cases_v3 — present only for v0.5 barrier_two_sided rounds. */
+  barrierLowPriceE8: bigint | null;
+  barrierHighPriceE8: bigint | null;
 };
 
 export function toMarketWithPrices(row: MarketRow): MarketWithPrices {
@@ -425,8 +428,24 @@ export function toMarketWithPrices(row: MarketRow): MarketWithPrices {
     strikePrice: row.strikePrice ? Number(row.strikePrice) : null,
     recurringGroupId: row.recurringGroupId,
     caseId: row.caseId != null ? row.caseId.toString() : null,
+    barrierLowPriceE8:
+      row.barrierLowPriceE8 != null ? row.barrierLowPriceE8.toString() : null,
+    barrierHighPriceE8:
+      row.barrierHighPriceE8 != null
+        ? row.barrierHighPriceE8.toString()
+        : null,
   };
 }
+
+// Pull barrier prices from cases_v3 via a LEFT JOIN on the spawn-side keying:
+// `series_id == recurring_group_id` (v0.5 convention) and
+// `round_idx == case_id`. caseId is bigint mode, roundIdx is number mode but
+// stored as bigint — explicit `::bigint` cast on the markets side keeps the
+// comparison total even if a future migration tightens the column types.
+const casesV3MarketJoinCondition = and(
+  eq(casesV3.seriesId, markets.recurringGroupId),
+  eq(sql`${casesV3.roundIdx}::bigint`, sql`${markets.caseId}::bigint`),
+);
 
 const MARKET_SELECT = {
   id: markets.id,
@@ -447,6 +466,8 @@ const MARKET_SELECT = {
   strikePrice: markets.strikePrice,
   recurringGroupId: markets.recurringGroupId,
   caseId: markets.caseId,
+  barrierLowPriceE8: casesV3.barrierLowPriceE8,
+  barrierHighPriceE8: casesV3.barrierHighPriceE8,
 } as const;
 
 export async function getMarketsList(params: MarketsQueryParams = {}): Promise<MarketsResponse> {
@@ -487,6 +508,7 @@ export async function getMarketsList(params: MarketsQueryParams = {}): Promise<M
     db
       .select(MARKET_SELECT)
       .from(markets)
+      .leftJoin(casesV3, casesV3MarketJoinCondition)
       .where(where)
       .orderBy(orderBy)
       .limit(limitParam)
@@ -515,6 +537,16 @@ export async function getMarketById(id: string): Promise<MarketWithPrices | null
   const [row] = await db
     .select(MARKET_SELECT)
     .from(markets)
+    .leftJoin(
+      casesV3,
+      and(
+        eq(casesV3.seriesId, markets.recurringGroupId),
+        eq(
+          sql`${casesV3.roundIdx}::bigint`,
+          sql`${markets.caseId}::bigint`,
+        ),
+      ),
+    )
     .where(eq(markets.id, id))
     .limit(1);
   if (!row) return null;
