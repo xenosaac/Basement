@@ -16,6 +16,7 @@ import {
 } from "@/lib/series-config";
 import { fetchPythBatchPrices, pythE8ToCents } from "@/lib/pyth-hermes";
 import { computeOutcome } from "@/lib/parimutuel";
+import { computeBarrierOutcome } from "@/lib/barrier-resolve";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +28,15 @@ export const dynamic = "force-dynamic";
  * 2. Rotate rounds: for each series, ensure current round exists; close any
  *    expired OPEN rounds; resolve by outcome + settle payouts
  * 3. Record price_ticks for audit
+ *
+ * v0.5 (Phase E) settle path handles three `strikeKindCaptured` values:
+ *   - 'absolute_above' / 'absolute_below' / null  → legacy `computeOutcome`
+ *     (close vs strike threshold, INVALID on tie)
+ *   - 'barrier_two_sided'                         → `computeBarrierOutcome`
+ *     (UP iff price breached either barrier, DOWN if it stayed inside)
+ * Series with `kind === 'event_driven'` (ECO / Phase G) are routed to the
+ * dedicated `cron/eco-settle` cron and explicitly skipped here as a defensive
+ * guard, in case an event_driven series ever leaks into SERIES_CONFIG.
  *
  * Auth: Bearer ${CRON_SECRET}
  * Idempotent: safe to call concurrently (SERIALIZABLE tx on settle)
@@ -106,6 +116,13 @@ async function rotateSeriesRounds(
     errors: Array<{ seriesId?: string; error: string }>;
   },
 ) {
+  // Defense-in-depth: ECO (event_driven) series live in `ECO_SERIES_CONFIG`,
+  // not the rolling `SERIES_CONFIG` iterated here, and are settled by the
+  // dedicated `cron/eco-settle` cron. If one ever leaks into the rolling
+  // registry, this guard prevents the rotation loop from spawning rolling
+  // rounds or running rolling settle against the ECO case. See series-config.ts.
+  if (series.kind === "event_driven") return;
+
   const currentIdx = computeCurrentRoundIdx(series, nowSec);
   const liveTick = priceMap.get(series.pythFeedId.toLowerCase());
 
@@ -210,9 +227,39 @@ async function resolveCase(
         .limit(1);
       if (!caseRow || caseRow.state !== "OPEN") return;
 
-      const strikeE8 = caseRow.strikePriceE8 ?? liveTick.priceE8;
       const closeE8 = liveTick.priceE8;
-      const outcome = computeOutcome(strikeE8, closeE8);
+      // strikeKindCaptured is the spawn-time snapshot of seriesV3.strikeKind
+      // (more reliable than re-reading series.strikeKind, which may be edited
+      // mid-round). Legacy rolling rows captured before Phase A are NULL and
+      // default to absolute_above semantics via parimutuel.computeOutcome.
+      const kind = caseRow.strikeKindCaptured ?? "absolute_above";
+
+      let outcome: "UP" | "DOWN" | "INVALID";
+      if (kind === "barrier_two_sided") {
+        if (
+          caseRow.barrierLowPriceE8 == null ||
+          caseRow.barrierHighPriceE8 == null
+        ) {
+          throw new Error(
+            `barrier case ${series.seriesId}#${roundIdx} missing barrier columns ` +
+              `(low=${caseRow.barrierLowPriceE8}, high=${caseRow.barrierHighPriceE8})`,
+          );
+        }
+        outcome = computeBarrierOutcome(
+          closeE8,
+          caseRow.barrierLowPriceE8,
+          caseRow.barrierHighPriceE8,
+        );
+      } else {
+        // 'absolute_above' | 'absolute_below' | legacy null. The threshold
+        // direction is encoded by the series spec; v0 settle (DB-side) uses
+        // strict close-vs-strike for both — chain `threshold_type` is the
+        // spawn placeholder and not consulted here. computeOutcome returns
+        // UP/DOWN/INVALID based on close vs strike, and INVALID is treated
+        // as a refund downstream.
+        const strikeE8 = caseRow.strikePriceE8 ?? closeE8;
+        outcome = computeOutcome(strikeE8, closeE8);
+      }
 
       // pm-AMM order-book model: at resolve we only LOCK the outcome.
       // Positions stay as-is (sharesE8 untouched). Users sell their shares
