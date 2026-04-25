@@ -151,7 +151,12 @@ export function SeriesCardV2({
       ? "shadow-[inset_0_0_0_1px_rgba(239,68,68,0.4)]"
       : "";
 
-  const cardOuter = `group relative rounded-[${isHero ? "24px" : "22px"}] bg-[rgba(17,17,19,0.9)] backdrop-blur-2xl border border-white/[0.08] hover:border-white/[0.18] transition-[border-color,transform] duration-200 ${
+  // NB: do NOT inline `rounded-[${...}]` via template — Tailwind JIT can't
+  // resolve dynamic class names. Use explicit ternary so both literals appear
+  // verbatim in source for the content scanner.
+  const cardOuter = `group relative ${
+    isHero ? "rounded-[24px]" : "rounded-[22px]"
+  } bg-[rgba(17,17,19,0.9)] backdrop-blur-2xl border border-white/[0.08] hover:border-white/[0.18] transition-[border-color,transform] duration-200 ${
     isHero
       ? "p-6 hover:-translate-y-[1px] shadow-[0_0_40px_rgba(255,221,0,0.04)]"
       : "p-4 md:p-5"
