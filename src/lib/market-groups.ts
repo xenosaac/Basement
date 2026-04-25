@@ -11,7 +11,23 @@
  * Pyth feed-id getters). Feed ids are resolved via {@link pythFeedForGroup} at
  * call-time so module import stays side-effect-free.
  */
-import { pythBtcFeedId, pythEthFeedId, pythXauFeedId } from "./aptos";
+import {
+  pythAptFeedId,
+  pythBtcFeedId,
+  pythBrentFrontMonthFeedId,
+  pythEthFeedId,
+  pythEurUsdFeedId,
+  pythHypeFeedId,
+  pythMaticFeedId,
+  pythQqqFeedId,
+  pythSolFeedId,
+  pythUsdCnhFeedId,
+  pythUsdJpyFeedId,
+  pythXagFeedId,
+  pythXauFeedId,
+  pythXptFeedId,
+} from "./aptos";
+import { resolveBrentFeedId } from "./quant/brent-rollover";
 
 export type ResolutionKind = "pyth" | "switchboard" | "supra" | "manual" | "ucrt";
 export type SpawnCadence =
@@ -52,6 +68,55 @@ export type SpawnStrategy =
       thresholdType: typeof THRESHOLD_ABOVE | typeof THRESHOLD_BELOW;
       /** Expo of the Pyth feed this group uses. MUST match the feed's runtime
        *  `expo` — backend throws if `fetchPythPrice().expo !== pythExpo`. */
+      pythExpo: number;
+      /** TS-side market_type byte (see MARKET_TYPE_* above). */
+      marketType: number;
+      maxStalenessSec: number;
+      feeBps: number;
+      maxTradeBps: number;
+    }
+  | {
+      /** v0.5 dynamic-strike spawn. Strike X is computed at spawn time as
+       *  X = z · σ_tenor · k_fat (see `src/lib/quant/barrier-strike.ts`),
+       *  then translated to absolute strike(s) for ABOVE / BELOW / barrier
+       *  cases. Cron picks σ from `vol-estimator.ts` (rolling 7d realized,
+       *  fallback to `asset-params.ts` defaults). */
+      kind: "create_market_dynamic_strike";
+      /** Anchor for close_time. New anchors beyond `daily-ny-midnight`:
+       *   - `next-15m`         next quarter-hour boundary (UTC)
+       *   - `next-1h`          next top-of-hour (UTC)
+       *   - `daily-ny-noon`    12:00 ET (Brent / commodity daily)
+       *   - `daily-ny-4pm`     16:00 ET (NYSE close, RTH-only assets)
+       *   - `daily-ny-midnight` same as legacy `create_market`
+       */
+      closeAnchor:
+        | "next-15m"
+        | "next-1h"
+        | "daily-ny-noon"
+        | "daily-ny-4pm"
+        | "daily-ny-midnight";
+      /** Strike semantics:
+       *   - `absolute_above`     YES if close > P0·(1+X)
+       *   - `absolute_below`     YES if close < P0·(1−X)
+       *   - `barrier_two_sided`  YES if close hits either P0·(1−X) or P0·(1+X)
+       *                          (DB-side settle only; chain strike is placeholder)
+       */
+      strikeKind:
+        | "absolute_above"
+        | "absolute_below"
+        | "barrier_two_sided";
+      /** Where the cron should source σ_annual:
+       *   - `rolling-7d-realized`    `vol-estimator.computeRealizedVol7d` (preferred)
+       *   - `asset-params-fallback`  always use `asset-params.defaultSigmaAnnual`
+       */
+      volSource: "rolling-7d-realized" | "asset-params-fallback";
+      /** Trading-hours gate (used by the spawn cron, not on-chain):
+       *   - `rth-only`   NYSE 09:30–16:00 ET, Mon–Fri (QQQ)
+       *   - `fx-24x5`    Sun 22:00 UTC → Fri 21:00 UTC (forex)
+       *   - `always`     24/7 (crypto)
+       *  Defaults to `always` when omitted. */
+      marketHours?: "rth-only" | "fx-24x5" | "always";
+      /** Pyth feed expo (must match feed runtime). */
       pythExpo: number;
       /** TS-side market_type byte (see MARKET_TYPE_* above). */
       marketType: number;
@@ -174,7 +239,11 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     },
     questionTemplate:
       "Will Gold close above {strike} at the next New York midnight?",
-    active: true,
+    // v0.5 Phase C: superseded by `xau-1h-up` (hourly cadence + dynamic
+    // strike). Marked `legacyCleanupOnly` so any open daily case still
+    // resolves; spawn + UI skip this group from now on.
+    active: false,
+    legacyCleanupOnly: true,
   },
   "xau-daily-down": {
     groupId: "xau-daily-down",
@@ -202,7 +271,9 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     },
     questionTemplate:
       "Will Gold close below {strike} at the next New York midnight?",
-    active: true,
+    // v0.5 Phase C: superseded by `xau-1h-down`. See `xau-daily-up` note.
+    active: false,
+    legacyCleanupOnly: true,
   },
   // Retired: the old single-sided 24h XAU group. Kept in the registry with
   // `active: false` + `legacyCleanupOnly: true` so any open cases in this
@@ -224,6 +295,745 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     questionTemplate: "Will Gold's price be higher 24 hours from now?",
     active: false,
     legacyCleanupOnly: true,
+  },
+
+  /* ---------------------------------------------------------------------
+   * v0.5 Phase C — 25 new groups. All `active: false` until Phase D wires
+   * the dynamic-strike spawn path; flipping a group's `active` flag is
+   * what lets the cron pick it up. Expo / pool depth / fees are sensible
+   * defaults that Phase D will tune per asset once the Pyth feeds are
+   * filled in `.env`.
+   * ------------------------------------------------------------------ */
+
+  // --- Crypto / 高波动 ----------------------------------------------------
+
+  "sol-15m-strike-up": {
+    groupId: "sol-15m-strike-up",
+    assetSymbol: "SOL",
+    category: "crypto",
+    sortName: "SOL ↑",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 15 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-15m",
+      strikeKind: "absolute_above",
+      volSource: "rolling-7d-realized",
+      marketHours: "always",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 60,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate: "Will Solana break above {strike} in the next 15 minutes?",
+    active: false,
+  },
+  "sol-15m-strike-down": {
+    groupId: "sol-15m-strike-down",
+    assetSymbol: "SOL",
+    category: "crypto",
+    sortName: "SOL ↓",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 15 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-15m",
+      strikeKind: "absolute_below",
+      volSource: "rolling-7d-realized",
+      marketHours: "always",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 60,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate: "Will Solana break below {strike} in the next 15 minutes?",
+    active: false,
+  },
+  "sol-15m-barrier": {
+    groupId: "sol-15m-barrier",
+    assetSymbol: "SOL",
+    category: "crypto",
+    sortName: "SOL ⇔",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 15 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-15m",
+      strikeKind: "barrier_two_sided",
+      volSource: "rolling-7d-realized",
+      marketHours: "always",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 60,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate:
+      "Will Solana break out of the barrier range in the next 15 minutes?",
+    active: false,
+  },
+
+  "hype-1h-up": {
+    groupId: "hype-1h-up",
+    assetSymbol: "HYPE",
+    category: "crypto",
+    sortName: "HYPE ↑",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_above",
+      volSource: "rolling-7d-realized",
+      marketHours: "always",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 120,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate: "Will Hyperliquid break above {strike} in the next 1 hour?",
+    active: false,
+  },
+  "hype-1h-down": {
+    groupId: "hype-1h-down",
+    assetSymbol: "HYPE",
+    category: "crypto",
+    sortName: "HYPE ↓",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_below",
+      volSource: "rolling-7d-realized",
+      marketHours: "always",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 120,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate: "Will Hyperliquid break below {strike} in the next 1 hour?",
+    active: false,
+  },
+
+  "matic-1h-up": {
+    groupId: "matic-1h-up",
+    assetSymbol: "MATIC",
+    category: "crypto",
+    sortName: "MATIC ↑",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_above",
+      volSource: "rolling-7d-realized",
+      marketHours: "always",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 120,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate: "Will Polygon break above {strike} in the next 1 hour?",
+    active: false,
+  },
+  "matic-1h-down": {
+    groupId: "matic-1h-down",
+    assetSymbol: "MATIC",
+    category: "crypto",
+    sortName: "MATIC ↓",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_below",
+      volSource: "rolling-7d-realized",
+      marketHours: "always",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 120,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate: "Will Polygon break below {strike} in the next 1 hour?",
+    active: false,
+  },
+
+  "apt-1h-up": {
+    groupId: "apt-1h-up",
+    assetSymbol: "APT",
+    category: "crypto",
+    sortName: "APT ↑",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_above",
+      volSource: "rolling-7d-realized",
+      marketHours: "always",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 120,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate: "Will Aptos break above {strike} in the next 1 hour?",
+    active: false,
+  },
+  "apt-1h-down": {
+    groupId: "apt-1h-down",
+    assetSymbol: "APT",
+    category: "crypto",
+    sortName: "APT ↓",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_below",
+      volSource: "rolling-7d-realized",
+      marketHours: "always",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 120,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate: "Will Aptos break below {strike} in the next 1 hour?",
+    active: false,
+  },
+
+  // --- Commodity ---------------------------------------------------------
+
+  "xau-1h-up": {
+    groupId: "xau-1h-up",
+    assetSymbol: "XAU",
+    category: "commodity",
+    sortName: "XAU 1h ↑",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_above",
+      volSource: "rolling-7d-realized",
+      marketHours: "fx-24x5",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 300,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate: "Will Gold break above {strike} in the next 1 hour?",
+    active: false,
+  },
+  "xau-1h-down": {
+    groupId: "xau-1h-down",
+    assetSymbol: "XAU",
+    category: "commodity",
+    sortName: "XAU 1h ↓",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_below",
+      volSource: "rolling-7d-realized",
+      marketHours: "fx-24x5",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 300,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate: "Will Gold break below {strike} in the next 1 hour?",
+    active: false,
+  },
+
+  "xag-1h-up": {
+    groupId: "xag-1h-up",
+    assetSymbol: "XAG",
+    category: "commodity",
+    sortName: "XAG ↑",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_above",
+      volSource: "rolling-7d-realized",
+      marketHours: "fx-24x5",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 300,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate: "Will Silver break above {strike} in the next 1 hour?",
+    active: false,
+  },
+  "xag-1h-down": {
+    groupId: "xag-1h-down",
+    assetSymbol: "XAG",
+    category: "commodity",
+    sortName: "XAG ↓",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_below",
+      volSource: "rolling-7d-realized",
+      marketHours: "fx-24x5",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 300,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate: "Will Silver break below {strike} in the next 1 hour?",
+    active: false,
+  },
+
+  "xpt-1h-up": {
+    groupId: "xpt-1h-up",
+    assetSymbol: "XPT",
+    category: "commodity",
+    sortName: "XPT ↑",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_above",
+      volSource: "rolling-7d-realized",
+      marketHours: "fx-24x5",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 300,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate: "Will Platinum break above {strike} in the next 1 hour?",
+    active: false,
+  },
+  "xpt-1h-down": {
+    groupId: "xpt-1h-down",
+    assetSymbol: "XPT",
+    category: "commodity",
+    sortName: "XPT ↓",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_below",
+      volSource: "rolling-7d-realized",
+      marketHours: "fx-24x5",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 300,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate: "Will Platinum break below {strike} in the next 1 hour?",
+    active: false,
+  },
+
+  "brent-1d-up": {
+    groupId: "brent-1d-up",
+    assetSymbol: "BRENT",
+    category: "commodity",
+    sortName: "BRENT ↑",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 24 * 60 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "daily-ny-noon",
+      strikeKind: "absolute_above",
+      volSource: "rolling-7d-realized",
+      marketHours: "fx-24x5",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 600,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate:
+      "Will Brent break above {strike} by NY 12:00 ET close?",
+    active: false,
+  },
+  "brent-1d-down": {
+    groupId: "brent-1d-down",
+    assetSymbol: "BRENT",
+    category: "commodity",
+    sortName: "BRENT ↓",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 24 * 60 * 60,
+    tickSize: 1n,
+    priceExpo: -8,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "daily-ny-noon",
+      strikeKind: "absolute_below",
+      volSource: "rolling-7d-realized",
+      marketHours: "fx-24x5",
+      pythExpo: -8,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 600,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate:
+      "Will Brent break below {strike} by NY 12:00 ET close?",
+    active: false,
+  },
+
+  // --- Stocks ------------------------------------------------------------
+
+  "qqq-1d-up": {
+    groupId: "qqq-1d-up",
+    assetSymbol: "QQQ",
+    category: "stocks",
+    sortName: "QQQ ↑",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 24 * 60 * 60,
+    tickSize: 1n,
+    priceExpo: -5,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "daily-ny-4pm",
+      strikeKind: "absolute_above",
+      volSource: "rolling-7d-realized",
+      marketHours: "rth-only",
+      pythExpo: -5,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 600,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate:
+      "Will QQQ break above {strike} by NY 4:00 PM ET close?",
+    active: false,
+  },
+  "qqq-1d-down": {
+    groupId: "qqq-1d-down",
+    assetSymbol: "QQQ",
+    category: "stocks",
+    sortName: "QQQ ↓",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 24 * 60 * 60,
+    tickSize: 1n,
+    priceExpo: -5,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "daily-ny-4pm",
+      strikeKind: "absolute_below",
+      volSource: "rolling-7d-realized",
+      marketHours: "rth-only",
+      pythExpo: -5,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 600,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate:
+      "Will QQQ break below {strike} by NY 4:00 PM ET close?",
+    active: false,
+  },
+
+  // --- Others / Forex (24x5, weekend skip) -------------------------------
+
+  "eurusd-1h-up": {
+    groupId: "eurusd-1h-up",
+    assetSymbol: "EURUSD",
+    category: "others",
+    sortName: "EUR/USD ↑",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -5,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_above",
+      volSource: "rolling-7d-realized",
+      marketHours: "fx-24x5",
+      pythExpo: -5,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 120,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate:
+      "Will EUR/USD break above {strike} in the next 1 hour?",
+    active: false,
+  },
+  "eurusd-1h-down": {
+    groupId: "eurusd-1h-down",
+    assetSymbol: "EURUSD",
+    category: "others",
+    sortName: "EUR/USD ↓",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -5,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_below",
+      volSource: "rolling-7d-realized",
+      marketHours: "fx-24x5",
+      pythExpo: -5,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 120,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate:
+      "Will EUR/USD break below {strike} in the next 1 hour?",
+    active: false,
+  },
+
+  "usdjpy-1h-up": {
+    groupId: "usdjpy-1h-up",
+    assetSymbol: "USDJPY",
+    category: "others",
+    sortName: "USD/JPY ↑",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -5,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_above",
+      volSource: "rolling-7d-realized",
+      marketHours: "fx-24x5",
+      pythExpo: -5,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 120,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate:
+      "Will USD/JPY break above {strike} in the next 1 hour?",
+    active: false,
+  },
+  "usdjpy-1h-down": {
+    groupId: "usdjpy-1h-down",
+    assetSymbol: "USDJPY",
+    category: "others",
+    sortName: "USD/JPY ↓",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -5,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_below",
+      volSource: "rolling-7d-realized",
+      marketHours: "fx-24x5",
+      pythExpo: -5,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 120,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate:
+      "Will USD/JPY break below {strike} in the next 1 hour?",
+    active: false,
+  },
+
+  "usdcnh-1h-up": {
+    groupId: "usdcnh-1h-up",
+    assetSymbol: "USDCNH",
+    category: "others",
+    sortName: "USD/CNH ↑",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -5,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_above",
+      volSource: "rolling-7d-realized",
+      marketHours: "fx-24x5",
+      pythExpo: -5,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 120,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate:
+      "Will USD/CNH break above {strike} in the next 1 hour?",
+    active: false,
+  },
+  "usdcnh-1h-down": {
+    groupId: "usdcnh-1h-down",
+    assetSymbol: "USDCNH",
+    category: "others",
+    sortName: "USD/CNH ↓",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 60 * 60,
+    tickSize: 1n,
+    priceExpo: -5,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "next-1h",
+      strikeKind: "absolute_below",
+      volSource: "rolling-7d-realized",
+      marketHours: "fx-24x5",
+      pythExpo: -5,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 120,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate:
+      "Will USD/CNH break below {strike} in the next 1 hour?",
+    active: false,
   },
 };
 
@@ -300,10 +1110,43 @@ export function pythFeedForGroup(spec: MarketGroupSpec): string {
   if (spec.resolutionKind !== "pyth") {
     throw new Error(`group ${spec.groupId} is not a pyth group`);
   }
-  if (spec.assetSymbol === "BTC") return pythBtcFeedId();
-  if (spec.assetSymbol === "ETH") return pythEthFeedId();
-  if (spec.assetSymbol === "XAU") return pythXauFeedId();
-  throw new Error(`no pyth feed for asset ${spec.assetSymbol}`);
+  switch (spec.assetSymbol) {
+    case "BTC":
+      return pythBtcFeedId();
+    case "ETH":
+      return pythEthFeedId();
+    case "XAU":
+      return pythXauFeedId();
+    case "SOL":
+      return pythSolFeedId();
+    case "MATIC":
+      return pythMaticFeedId();
+    case "APT":
+      return pythAptFeedId();
+    case "XAG":
+      return pythXagFeedId();
+    case "XPT":
+      return pythXptFeedId();
+    case "HYPE":
+      return pythHypeFeedId();
+    case "BRENT":
+      // Brent is a front-month rolling futures contract. Prefer the env
+      // override (`PYTH_BRENT_FRONT_MONTH_FEED_ID`) if set; otherwise fall
+      // back to the static rollover table keyed by current YYYYMM (with a
+      // 5-day pre-rollover buffer so the cron switches to the next month
+      // before the active contract expires).
+      return resolveBrentFeedId(Math.floor(Date.now() / 1000));
+    case "QQQ":
+      return pythQqqFeedId();
+    case "EURUSD":
+      return pythEurUsdFeedId();
+    case "USDJPY":
+      return pythUsdJpyFeedId();
+    case "USDCNH":
+      return pythUsdCnhFeedId();
+    default:
+      throw new Error(`no pyth feed for asset ${spec.assetSymbol}`);
+  }
 }
 
 /**
@@ -507,6 +1350,18 @@ export function deriveMarketParams(
       thresholdType: 0, // matches Move `spawn_recurring_3min` hardcode (ABOVE)
       question,
     };
+  }
+
+  if (strategy.kind === "create_market_dynamic_strike") {
+    // v0.5 Phase C: registry exposes the variant for Phase D's cron rewrite,
+    // which will own σ-driven strike computation via `quant/barrier-strike`.
+    // `deriveMarketParams` is the legacy synchronous derivation path —
+    // dynamic-strike groups go through their own async cron branch instead.
+    throw new Error(
+      `[deriveMarketParams] group ${spec.groupId} uses ` +
+        `create_market_dynamic_strike — derive via the Phase D dynamic spawn ` +
+        `path (src/lib/quant/barrier-strike.ts), not deriveMarketParams.`,
+    );
   }
 
   // create_market path. Compute offset + tick-round per direction.
