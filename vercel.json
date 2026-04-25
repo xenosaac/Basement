@@ -15,6 +15,14 @@
     {
       "path": "/api/cron/tick",
       "schedule": "*/1 * * * *"
+    },
+    {
+      "path": "/api/cron/eco-spawn",
+      "schedule": "0 13 * * *"
+    },
+    {
+      "path": "/api/cron/eco-settle",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

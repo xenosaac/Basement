@@ -11,6 +11,43 @@
 
 import type { SeriesCategory, SeriesId } from "./types/v3-api";
 
+/**
+ * v0.5 / Phase G — ECO event-driven binary product spec.
+ * One spec per ECO series (CPI / Core PCE / Unemployment / GDP). Read by
+ * `eco-spawn` (uses `spawnAheadSec` + `freezeBeforeReleaseSec` + `pythFeedId`)
+ * and `eco-settle` (uses `settleMaxAgeSec` + `direction` + `pythFeedId`).
+ *
+ * Strike resolution v0:
+ *   - `strikeSource = "hardcoded"` + `strikeValueRaw` (price_e8 / e8 native).
+ *     Phase G+ may add "previous_release" (lookup last actual_released_price)
+ *     and "consensus_static" (operator-curated consensus from BLS prelim).
+ */
+export type EcoEventType =
+  | "us_cpi_mom"
+  | "us_core_pce_mom"
+  | "us_unemployment"
+  | "us_gdp_qoq";
+
+export interface EventDrivenSpec {
+  eventType: EcoEventType;
+  /** Where strikePriceE8 comes from for newly-spawned ECO cases. */
+  strikeSource: "previous_release" | "consensus_static" | "hardcoded";
+  /** Raw E8 value, only used when strikeSource === "hardcoded". */
+  strikeValueRaw?: bigint;
+  /** YES wins when actual `direction` strike — UP for ABOVE, DOWN for BELOW. */
+  direction: "ABOVE" | "BELOW";
+  /** How far ahead of release the case is spawned (default 7 days = 604800s). */
+  spawnAheadSec: number;
+  /** Buffer before release where mutations freeze (closeTime = release - this). */
+  freezeBeforeReleaseSec: number;
+  /** Spacing between settle-poll attempts (informational only; cron drives cadence). */
+  settlePollAfterReleaseSec: number;
+  /** Hard ceiling: if release+settleMaxAgeSec passes with no fresh tick → VOID. */
+  settleMaxAgeSec: number;
+  /** 64-char hex hermes-beta Pyth feed id (no 0x). Same shape as rolling series. */
+  pythFeedId: string;
+}
+
 export interface SeriesStaticConfig {
   seriesId: SeriesId;
   assetSymbol: string;
@@ -27,6 +64,13 @@ export interface SeriesStaticConfig {
   /** Unix seconds origin for round_idx calculation. Deterministic across
    * deploys — tied to an anchor time so round_idx stays stable. */
   seriesStartSec: number;
+  /** v0.5 series kind. Defaults "rolling" (existing 3m/1h cadence rounds).
+   *  "event_driven" → ECO series (CPI/PCE/etc.) handled by eco-spawn / eco-settle. */
+  kind?: "rolling" | "event_driven";
+  /** Required when kind === "event_driven". */
+  eventDriven?: EventDrivenSpec;
+  /** pm-AMM L override in dollars. NULL → env PM_AMM_L_DOLLARS. ECO uses 300. */
+  pmAmmLDollars?: number;
 }
 
 // Anchor time: 2026-04-24 00:00:00 UTC (demo start)
@@ -127,7 +171,163 @@ export const SERIES_BY_ID: Record<SeriesId, SeriesStaticConfig> =
   );
 
 export function getSeries(id: string): SeriesStaticConfig | undefined {
-  return SERIES_BY_ID[id as SeriesId];
+  return SERIES_BY_ID[id as SeriesId] ?? ECO_SERIES_BY_ID[id];
+}
+
+// ───────────────────── ECO series (Phase G) ─────────────────────
+// v0 demo: status, BLS calendar + Pyth ECO feed ids reviewed each quarter.
+// Pyth ECO feed ids on hermes-beta — verify before flipping isActive.
+// PM_AMM_L override = $300 per series (vs $100 rolling) — long tenor, larger pool.
+//
+// IMPORTANT: ECO series live in a separate registry (ECO_SERIES_CONFIG) and
+// are NOT included in the rolling SERIES_CONFIG iterated by `cron/tick`. The
+// dedicated `cron/eco-spawn` + `cron/eco-settle` routes pick these up. This
+// avoids feeding event_driven cases into the rolling rotation loop. Phase E
+// will additionally add a defensive `if (kind==='event_driven') continue;`
+// guard inside `cron/tick/route.ts::rotateSeriesRounds`.
+
+/** Loose ECO series config — does NOT flow through strict SeriesId/Category
+ * types in v3-api.ts (those are reserved for the rolling product surface). */
+export interface EcoSeriesConfig
+  extends Omit<SeriesStaticConfig, "seriesId" | "category" | "kind"> {
+  seriesId: string;
+  category: SeriesCategory;
+  kind: "event_driven";
+  eventDriven: EventDrivenSpec;
+}
+
+const ECO_SPAWN_AHEAD_SEC = 7 * 86400; // 604800
+const ECO_FREEZE_BEFORE_RELEASE_SEC = 60;
+const ECO_SETTLE_POLL_SEC = 5;
+const ECO_SETTLE_MAX_AGE_SEC = 1800; // 30 min
+const ECO_PM_AMM_L_DOLLARS = 300;
+
+export const ECO_SERIES_CONFIG: readonly EcoSeriesConfig[] = [
+  {
+    seriesId: "eco-cpi-mom-monthly",
+    assetSymbol: "US_CPI_MOM",
+    pair: "US_CPI_MOM/PCT",
+    // Phase F will add "macro" category enum — until then mark as crypto_ext
+    // so the Phase A schema FK + frontend list code don't trip over the value.
+    // (eco-* groupId prefix is the Phase F UI-tab discriminator anyway.)
+    category: "crypto_ext",
+    cadenceSec: 0, // ECO is event-driven, not cadence-driven
+    pythFeedId: "f3b50961ff387a3d68217e2715637d0add6013e7ecb2d7b6f6b8b1b8b6b8b8b8",
+    marketHoursGated: false,
+    feeBps: 200,
+    sortOrder: 100,
+    seriesStartSec: SERIES_START_ANCHOR_SEC,
+    kind: "event_driven",
+    pmAmmLDollars: ECO_PM_AMM_L_DOLLARS,
+    eventDriven: {
+      eventType: "us_cpi_mom",
+      strikeSource: "hardcoded",
+      strikeValueRaw: 30_000_000n, // 0.30% MoM at e8 — placeholder; Phase F revises
+      direction: "ABOVE",
+      spawnAheadSec: ECO_SPAWN_AHEAD_SEC,
+      freezeBeforeReleaseSec: ECO_FREEZE_BEFORE_RELEASE_SEC,
+      settlePollAfterReleaseSec: ECO_SETTLE_POLL_SEC,
+      settleMaxAgeSec: ECO_SETTLE_MAX_AGE_SEC,
+      pythFeedId: "f3b50961ff387a3d68217e2715637d0add6013e7ecb2d7b6f6b8b1b8b6b8b8b8",
+    },
+  },
+  {
+    seriesId: "eco-core-pce-monthly",
+    assetSymbol: "US_CORE_PCE_MOM",
+    pair: "US_CORE_PCE_MOM/PCT",
+    category: "crypto_ext",
+    cadenceSec: 0,
+    pythFeedId: "a6c1bc8ab8b6b8b6b8b6b8b6b8b6b8b6b8b6b8b6b8b6b8b6b8b6b8b6b8b6b8b6",
+    marketHoursGated: false,
+    feeBps: 200,
+    sortOrder: 101,
+    seriesStartSec: SERIES_START_ANCHOR_SEC,
+    kind: "event_driven",
+    pmAmmLDollars: ECO_PM_AMM_L_DOLLARS,
+    eventDriven: {
+      eventType: "us_core_pce_mom",
+      strikeSource: "hardcoded",
+      strikeValueRaw: 25_000_000n, // 0.25% MoM placeholder
+      direction: "ABOVE",
+      spawnAheadSec: ECO_SPAWN_AHEAD_SEC,
+      freezeBeforeReleaseSec: ECO_FREEZE_BEFORE_RELEASE_SEC,
+      settlePollAfterReleaseSec: ECO_SETTLE_POLL_SEC,
+      settleMaxAgeSec: ECO_SETTLE_MAX_AGE_SEC,
+      pythFeedId: "a6c1bc8ab8b6b8b6b8b6b8b6b8b6b8b6b8b6b8b6b8b6b8b6b8b6b8b6b8b6b8b6",
+    },
+  },
+  {
+    seriesId: "eco-unemployment-monthly",
+    assetSymbol: "US_UNRATE",
+    pair: "US_UNRATE/PCT",
+    category: "crypto_ext",
+    cadenceSec: 0,
+    pythFeedId: "b7c2cd9bc9c7c9c7c9c7c9c7c9c7c9c7c9c7c9c7c9c7c9c7c9c7c9c7c9c7c9c7",
+    marketHoursGated: false,
+    feeBps: 200,
+    sortOrder: 102,
+    seriesStartSec: SERIES_START_ANCHOR_SEC,
+    kind: "event_driven",
+    pmAmmLDollars: ECO_PM_AMM_L_DOLLARS,
+    eventDriven: {
+      eventType: "us_unemployment",
+      strikeSource: "hardcoded",
+      strikeValueRaw: 410_000_000n, // 4.10% UNRATE at e8 placeholder
+      direction: "ABOVE",
+      spawnAheadSec: ECO_SPAWN_AHEAD_SEC,
+      freezeBeforeReleaseSec: ECO_FREEZE_BEFORE_RELEASE_SEC,
+      settlePollAfterReleaseSec: ECO_SETTLE_POLL_SEC,
+      settleMaxAgeSec: ECO_SETTLE_MAX_AGE_SEC,
+      pythFeedId: "b7c2cd9bc9c7c9c7c9c7c9c7c9c7c9c7c9c7c9c7c9c7c9c7c9c7c9c7c9c7c9c7",
+    },
+  },
+  {
+    seriesId: "eco-gdp-qoq-quarterly",
+    assetSymbol: "US_GDP_QOQ",
+    pair: "US_GDP_QOQ/PCT",
+    category: "crypto_ext",
+    cadenceSec: 0,
+    pythFeedId: "c8d3deacdadbdadbdadbdadbdadbdadbdadbdadbdadbdadbdadbdadbdadbdadb",
+    marketHoursGated: false,
+    feeBps: 200,
+    sortOrder: 103,
+    seriesStartSec: SERIES_START_ANCHOR_SEC,
+    kind: "event_driven",
+    pmAmmLDollars: ECO_PM_AMM_L_DOLLARS,
+    eventDriven: {
+      eventType: "us_gdp_qoq",
+      strikeSource: "hardcoded",
+      strikeValueRaw: 200_000_000n, // 2.00% QoQ placeholder
+      direction: "ABOVE",
+      spawnAheadSec: ECO_SPAWN_AHEAD_SEC,
+      freezeBeforeReleaseSec: ECO_FREEZE_BEFORE_RELEASE_SEC,
+      settlePollAfterReleaseSec: ECO_SETTLE_POLL_SEC,
+      settleMaxAgeSec: ECO_SETTLE_MAX_AGE_SEC,
+      pythFeedId: "c8d3deacdadbdadbdadbdadbdadbdadbdadbdadbdadbdadbdadbdadbdadbdadb",
+    },
+  },
+];
+
+export const ECO_SERIES_BY_ID: Record<string, EcoSeriesConfig> =
+  ECO_SERIES_CONFIG.reduce(
+    (acc, s) => ({ ...acc, [s.seriesId]: s }),
+    {} as Record<string, EcoSeriesConfig>,
+  );
+
+/** Map calendar `event_type` → seriesId. Used by eco-spawn when picking the
+ *  series row to spawn a case under for a calendar entry. */
+export const ECO_EVENT_TYPE_TO_SERIES_ID: Record<EcoEventType, string> = {
+  us_cpi_mom: "eco-cpi-mom-monthly",
+  us_core_pce_mom: "eco-core-pce-monthly",
+  us_unemployment: "eco-unemployment-monthly",
+  us_gdp_qoq: "eco-gdp-qoq-quarterly",
+};
+
+export function getEcoSeriesByEventType(
+  eventType: string,
+): EcoSeriesConfig | undefined {
+  const seriesId = ECO_EVENT_TYPE_TO_SERIES_ID[eventType as EcoEventType];
+  return seriesId ? ECO_SERIES_BY_ID[seriesId] : undefined;
 }
 
 /** round_idx = floor((now - series_start) / cadence) — monotonic, resilient to cron delay */
