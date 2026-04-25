@@ -74,7 +74,7 @@ export default function PortfolioPage() {
       <p className="text-sm text-white/40 mb-8 font-mono">{address}</p>
 
       {/* Balance card */}
-      <div className="glass rounded-lg p-6 mb-8">
+      <div className="glass rounded-lg p-6 mb-3">
         <div className="flex items-center justify-between mb-3">
           <div>
             <div className="text-xs uppercase tracking-[2px] text-white/30 mb-1">
@@ -94,32 +94,7 @@ export default function PortfolioPage() {
             <div className="text-[10px] text-white/30 mt-0.5">mark-to-market</div>
           </div>
         </div>
-        <div className="border-t border-white/[0.06] pt-3 flex items-center justify-between">
-          <div className="flex flex-col gap-1">
-            {canClaim ? (
-              <button
-                type="button"
-                onClick={() => faucet.mutate()}
-                disabled={faucet.isPending}
-                className="px-3 py-1.5 rounded-pill bg-accent text-black text-xs font-semibold hover:shadow-glow-sm transition disabled:opacity-50 self-start"
-              >
-                {faucet.isPending ? "Claiming…" : "Claim $50 faucet"}
-              </button>
-            ) : (
-              <span className="text-xs text-white/40">
-                Next faucet in{" "}
-                {Math.ceil(
-                  ((balance?.nextFaucetAtSec ?? 0) - nowSec) / 3600,
-                )}
-                h
-              </span>
-            )}
-            {faucet.error instanceof BetError && (
-              <span className="text-xs text-no">
-                {codeToUserMessage(faucet.error.code)}
-              </span>
-            )}
-          </div>
+        <div className="border-t border-white/[0.06] pt-3 flex items-center justify-end">
           <span className="text-xs text-white/40 font-mono">
             Lifetime P&L:{" "}
             <span className={totalProfit >= 0 ? "text-yes" : "text-no"}>
@@ -127,6 +102,35 @@ export default function PortfolioPage() {
               {centsToUsd(totalProfit)}
             </span>
           </span>
+        </div>
+      </div>
+
+      {/* Faucet pill — 永远常驻在 balance 卡下方。24h cooldown 由 /api/faucet/claim 服务端强制。 */}
+      <div className="glass rounded-pill px-5 py-2.5 mb-8 flex items-center justify-between gap-3">
+        <span className="text-xs text-white/55">
+          Free 50 VirtualUSD · 24h cooldown
+        </span>
+        <div className="flex items-center gap-3">
+          {faucet.error instanceof BetError && (
+            <span className="text-xs text-no">
+              {codeToUserMessage(faucet.error.code)}
+            </span>
+          )}
+          {canClaim ? (
+            <button
+              type="button"
+              onClick={() => faucet.mutate()}
+              disabled={faucet.isPending}
+              className="px-3 py-1.5 rounded-pill bg-accent text-black text-xs font-semibold hover:shadow-glow-sm transition disabled:opacity-50"
+            >
+              {faucet.isPending ? "Claiming…" : "Claim 50 VirtualUSD"}
+            </button>
+          ) : (
+            <span className="text-xs text-white/40 font-mono tabular-nums">
+              Next claim in{" "}
+              {Math.ceil(((balance?.nextFaucetAtSec ?? 0) - nowSec) / 3600)}h
+            </span>
+          )}
         </div>
       </div>
 
@@ -180,7 +184,8 @@ export default function PortfolioPage() {
         </div>
       )}
 
-      {/* Resolved positions — winning shares now redeem at $1.00, sell to realize. */}
+      {/* Resolved positions — redemption price locked. Sell to settle:
+            winners @ $1, losers @ $0, voided rounds @ cost-basis refund. */}
       {claimable.length > 0 && (
         <div className="mb-8">
           <h2 className="text-xs text-accent uppercase tracking-wider mb-3 flex items-center gap-2">
@@ -192,23 +197,32 @@ export default function PortfolioPage() {
               const payout = Number(p.claimableCents ?? 0);
               const cost = Number(p.costBasisCents);
               const profit = payout - cost;
+              const sharesNum = Number(p.sharesE8) / 1e8;
+              const pricePerShare = sharesNum > 0 ? payout / sharesNum / 100 : 0;
+              const profitClass =
+                profit > 0 ? "text-yes" : profit < 0 ? "text-no" : "text-white/40";
+              const profitSign = profit > 0 ? "+" : "";
               const isPending =
                 sell.isPending &&
                 sell.variables?.seriesId === (p.seriesId as SeriesId) &&
                 sell.variables?.roundIdx === p.roundIdx &&
                 sell.variables?.side === p.side;
               return (
-                <div
+                <Link
                   key={`sell-${p.seriesId}-${p.roundIdx}-${p.side}`}
-                  className="glass rounded-lg px-5 py-3 flex items-center justify-between gap-4"
+                  href={`/series/${p.seriesId}/round/${p.roundIdx}`}
+                  className="glass rounded-lg px-5 py-3 flex items-center justify-between gap-4 hover:border-white/[0.18] border border-transparent transition"
                 >
                   <div>
                     <p className="text-sm text-white/90">
                       {p.seriesId} · Round {p.roundIdx}
                     </p>
                     <p className="text-xs text-white/40 mt-1 font-mono tabular-nums">
-                      {(Number(p.sharesE8) / 1e8).toFixed(2)} sh @ $1.00 ·{" "}
-                      <span className="text-yes">+{centsToUsd(profit)}</span>
+                      {sharesNum.toFixed(2)} sh @ ${pricePerShare.toFixed(2)} ·{" "}
+                      <span className={profitClass}>
+                        {profitSign}
+                        {centsToUsd(profit)}
+                      </span>
                     </p>
                   </div>
                   <span
@@ -218,20 +232,26 @@ export default function PortfolioPage() {
                   </span>
                   <button
                     type="button"
-                    onClick={() =>
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
                       sell.mutate({
                         seriesId: p.seriesId as SeriesId,
                         roundIdx: p.roundIdx,
                         side: p.side as BetSide,
                         sharesE8: BigInt(p.sharesE8),
-                      })
-                    }
+                      });
+                    }}
                     disabled={sell.isPending}
                     className="px-3 py-1.5 rounded-md bg-accent text-black text-xs font-semibold hover:shadow-glow-sm transition disabled:opacity-50"
                   >
-                    {isPending ? "Selling…" : `Sell ${centsToUsd(payout)}`}
+                    {isPending
+                      ? "Selling…"
+                      : payout > 0
+                        ? `Sell ${centsToUsd(payout)}`
+                        : "Close out"}
                   </button>
-                </div>
+                </Link>
               );
             })}
           </div>

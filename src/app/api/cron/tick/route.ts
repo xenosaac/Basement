@@ -157,12 +157,32 @@ async function rotateSeriesRounds(
     )
     .limit(1);
   if (existing.length === 0) {
+    // Hermes-beta 在 batch 拉多 feed + Vercel 多 cron 并发时约 20% 概率漏返
+    // 某个 feed（partial JSON, 不 throw）。缺 strike 不能 spawn — 不然这个
+    // round 必死 VOID（resolve 时 strike==close → INVALID）。先做一次单
+    // feed inline retry 抢救；还是没有就 skip 这个 tick，下个 cron tick 重试。
+    let strikeTick = liveTick;
+    if (!strikeTick) {
+      try {
+        const feedId = series.pythFeedId;
+        const retry = await fetchPythBatchPrices([feedId]);
+        strikeTick = retry.get(feedId.toLowerCase().replace(/^0x/, ""));
+      } catch (err) {
+        report.errors.push({
+          seriesId: series.seriesId,
+          error: `pyth strike retry failed: ${(err as Error).message}`,
+        });
+      }
+    }
+    if (!strikeTick) {
+      report.errors.push({
+        seriesId: series.seriesId,
+        error: `skip spawn ${currentIdx} — no Pyth strike (will retry next tick)`,
+      });
+      return;
+    }
     const startSec = computeRoundStart(series, currentIdx);
     const closeSec = computeRoundClose(series, currentIdx);
-    const strikeE8 = liveTick?.priceE8 ?? null;
-    const strikeCents = liveTick
-      ? pythE8ToCents(liveTick.priceE8, liveTick.expo)
-      : null;
     await db
       .insert(casesV3)
       .values({
@@ -170,8 +190,8 @@ async function rotateSeriesRounds(
         roundIdx: currentIdx,
         startTimeSec: startSec,
         closeTimeSec: closeSec,
-        strikePriceE8: strikeE8,
-        strikeCents,
+        strikePriceE8: strikeTick.priceE8,
+        strikeCents: pythE8ToCents(strikeTick.priceE8, strikeTick.expo),
         state: "OPEN",
       })
       .onConflictDoNothing();
@@ -257,8 +277,18 @@ async function resolveCase(
         // spawn placeholder and not consulted here. computeOutcome returns
         // UP/DOWN/INVALID based on close vs strike, and INVALID is treated
         // as a refund downstream.
-        const strikeE8 = caseRow.strikePriceE8 ?? closeE8;
-        outcome = computeOutcome(strikeE8, closeE8);
+        if (caseRow.strikePriceE8 === null) {
+          // spawn 路径已堵 NULL strike（rotateSeriesRounds skip-on-miss）。
+          // 万一残留 NULL，绝不静默 fallback 成 strike==close → 必然 INVALID
+          // —— 那会掩盖 spawn-时 Pyth 抓取失败的真相。留 OPEN 让 operator
+          // 看到 errors 报告手动决定（强制 VOID / 手填 strike / 重 spawn）。
+          report.errors.push({
+            seriesId: series.seriesId,
+            error: `cannot resolve ${roundIdx} — strikePriceE8 NULL (spawn-time pyth fail, left OPEN)`,
+          });
+          return;
+        }
+        outcome = computeOutcome(caseRow.strikePriceE8, closeE8);
       }
 
       // pm-AMM order-book model: at resolve we only LOCK the outcome.

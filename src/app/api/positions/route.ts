@@ -7,6 +7,16 @@ import type { ApiErrorResponse, PositionsResponse } from "@/lib/types/v3-api";
 
 export const dynamic = "force-dynamic";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 设计原则：只有 BUY 和 SELL 两种操作，没有 "claim"。
+// Resolve 不动 sharesE8，只锁定 redemption 价格：
+//   RESOLVED 赢方 → SELL @ $1.00/share
+//   RESOLVED 输方 → SELL @ $0.00/share（清账，无收益但允许）
+//   VOID         → SELL @ cost-basis-pro-rata（refund at cost）
+// 因此：任何 sharesE8 > 0 的行都应该可见，让用户能 SELL。
+// "CLAIMABLE" status 字符串是历史命名，语义上 = "已 resolve 但仍持有筹码 → 可 sell"。
+// ─────────────────────────────────────────────────────────────────────────────
+
 function err(code: string, message: string, status = 400) {
   const body: ApiErrorResponse = { error: { code: code as never, message, detail: undefined as never } };
   return NextResponse.json(body, { status });
@@ -19,7 +29,7 @@ export async function GET(request: NextRequest) {
 
   // Pull every position the user has ever touched (open or settled). Total
   // realized P&L sums across all of them; the response list is filtered down
-  // to OPEN + CLAIMABLE for display below.
+  // to OPEN + CLAIMABLE (= still holding shares) for display below.
   const rows = await db
     .select({
       seriesId: positionsV3.seriesId,
@@ -58,32 +68,50 @@ export async function GET(request: NextRequest) {
   const positions = rows.map((r) => {
     const isOpenCase = r.caseState === "OPEN";
     const isResolved = r.caseState === "RESOLVED" || r.caseState === "VOID";
-    const isClaimable =
-      isResolved && r.claimedAt == null && r.realizedPnlCents > 0n;
+    const isVoid = r.caseState === "VOID";
+    const stillHolding = r.sharesE8 > 0n;
 
+    // Status =
+    //   OPEN       = 还在交易中且持有筹码（可 BUY/SELL）
+    //   CLAIMABLE  = 已 resolve 且仍持有筹码（可 SELL — 赢家@$1, 输家@$0, VOID@cost basis）
+    //   CLAIMED    = 已 resolve 且筹码已 sell 干净（不返回）
+    //   LOST       = 兜底（不返回）
     let status: "OPEN" | "CLAIMABLE" | "CLAIMED" | "LOST";
-    if (isOpenCase && r.sharesE8 > 0n) {
+    if (isOpenCase && stillHolding) {
       status = "OPEN";
-    } else if (isClaimable) {
+    } else if (isResolved && stillHolding) {
       status = "CLAIMABLE";
-    } else if (isResolved && r.realizedPnlCents > 0n && r.claimedAt != null) {
-      status = "CLAIMED";
+    } else if (isResolved && !stillHolding) {
+      status = "CLAIMED"; // 包含 sell 完的赢家、输家、VOID 退完的
     } else {
       status = "LOST";
     }
 
+    // Mark value = 用户此刻 sell 完所有 shares 能拿到的钱。
     let markValueCents: bigint | null = null;
     let unrealizedPnlCents: bigint | null = null;
     if (status === "OPEN" && r.upSharesE8 != null && r.downSharesE8 != null) {
+      // 现行 pm-AMM curve marginal price（近似 — 真 sell quote 在 /api/quote）
       const prices = curvePrices(r.upSharesE8, r.downSharesE8);
       const sidePriceCents = r.side === "UP" ? prices.upCents : prices.downCents;
       markValueCents = (r.sharesE8 * BigInt(sidePriceCents)) / 100_000_000n;
       unrealizedPnlCents = markValueCents - r.costBasisCents;
       totalMark += markValueCents;
+    } else if (status === "CLAIMABLE") {
+      if (isVoid) {
+        // VOID: refund 等于剩余 cost basis（pro-rata）
+        markValueCents = r.costBasisCents;
+      } else {
+        // RESOLVED: 赢方 = shares × $1，输方 = $0
+        const winning = r.resolvedOutcome === r.side;
+        markValueCents = winning ? r.sharesE8 / 1_000_000n : 0n;
+      }
+      unrealizedPnlCents = markValueCents - r.costBasisCents;
+      totalMark += markValueCents;
     }
 
-    // Lifetime realized P&L includes both claimed and unclaimed-but-resolved
-    // positions — the outcome is locked at resolve time.
+    // Lifetime realized P&L includes positions whose redemption is locked
+    // (sold or not) — outcome was decided at resolve time.
     totalRealized += r.realizedPnlCents;
 
     return {
@@ -97,16 +125,16 @@ export async function GET(request: NextRequest) {
       unrealizedPnlCents: unrealizedPnlCents?.toString() ?? null,
       claimedAt: r.claimedAt?.toISOString() ?? null,
       status,
-      // Settle value for claimable rows (cost basis + realized P&L). UI uses
-      // this on the Claim button.
-      claimableCents: status === "CLAIMABLE"
-        ? (r.costBasisCents + r.realizedPnlCents).toString()
-        : null,
+      // Sell value for CLAIMABLE rows. = exactly markValueCents (locked
+      // redemption, no AMM slippage post-resolve). Field name is historical;
+      // it's just "what user gets if they SELL all remaining shares now".
+      claimableCents:
+        status === "CLAIMABLE" ? markValueCents!.toString() : null,
     };
   });
 
-  // Hide CLAIMED + LOST rows from the response list (they bloat UI). They've
-  // already contributed to totalRealized.
+  // 只返回还持有筹码的行（OPEN + CLAIMABLE）。已 sell 干净的 (CLAIMED/LOST)
+  // 不返回 — totalRealized 已经累计过它们的历史 P&L。
   const visible = positions.filter(
     (p) => p.status === "OPEN" || p.status === "CLAIMABLE",
   );

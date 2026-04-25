@@ -82,6 +82,27 @@ export function TradePanelV3({
     if (!canBuy && direction === "BUY") setDirection("SELL");
   }, [canBuy, direction]);
 
+  // Auto-snap side to whichever side the user actually holds on this round —
+  // critical for Portfolio → round-detail entry where user may only own DOWN
+  // but panel defaults to UP. Only fires once after positions load; manual
+  // toggle thereafter wins.
+  const [sideAutoSnapped, setSideAutoSnapped] = useState(false);
+  useEffect(() => {
+    if (sideAutoSnapped || !positionsData) return;
+    const onThisRound = positionsData.positions.filter(
+      (p) => p.seriesId === series.seriesId && p.roundIdx === roundIdx,
+    );
+    if (onThisRound.length === 0) {
+      setSideAutoSnapped(true);
+      return;
+    }
+    const hasUp = onThisRound.some((p) => p.side === "UP");
+    const hasDown = onThisRound.some((p) => p.side === "DOWN");
+    if (hasDown && !hasUp) setSide("DOWN");
+    else if (hasUp && !hasDown) setSide("UP");
+    setSideAutoSnapped(true);
+  }, [positionsData, series.seriesId, roundIdx, sideAutoSnapped]);
+
   // Position for the currently selected side (sell mode source-of-truth)
   const myPosition = useMemo(() => {
     if (!positionsData) return null;

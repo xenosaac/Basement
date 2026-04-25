@@ -161,7 +161,16 @@ export async function POST(request: NextRequest) {
         // 4. Cost basis pro-rata + realized P&L
         const costBasisReleased =
           (position.costBasisCents * sharesBig) / position.sharesE8;
-        const realizedDelta = proceedsCents - costBasisReleased;
+        let realizedDelta = proceedsCents - costBasisReleased;
+
+        // RESOLVED 输方的 loss 已经在 cron tick resolve 时 booked 进
+        // realized_pnl_cents（commit 9c58deb）。sell-time 不再追加，避免
+        // double-count。VOID 不走这个分支（cron 不 book，sell delta=0 自然对）。
+        // RESOLVED 赢方 cron 也不 book wins，sell-time delta 是真利润，正常累加。
+        if (caseRow.state === "RESOLVED") {
+          const winning = caseRow.resolvedOutcome === sideTyped;
+          if (!winning) realizedDelta = 0n;
+        }
 
         // 5. Update case (only OPEN affects reserves; resolved is frozen)
         if (caseRow.state === "OPEN") {

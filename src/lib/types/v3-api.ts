@@ -239,14 +239,16 @@ export interface PositionRow {
   sharesE8: string;
   costBasisCents: string;
   realizedPnlCents: string;
-  // Live mark-to-market value if round still OPEN
+  /** Mark-to-market value of remaining shares.
+   *  OPEN: AMM curve marginal price · shares.
+   *  CLAIMABLE: locked redemption price · shares (winner $1, loser $0, void cost-basis). */
   markValueCents: string | null;
   unrealizedPnlCents: string | null;
-  /** ISO timestamp when user claimed this winning position (null = unclaimed). */
+  /** ISO timestamp of the last sell on this row (null if never sold). Historical name. */
   claimedAt: string | null;
-  /** Display state. */
+  /** Display state. CLAIMABLE = round resolved + still holding shares (sell to settle). */
   status: "OPEN" | "CLAIMABLE" | "CLAIMED" | "LOST";
-  /** Total payout if status=CLAIMABLE (cost basis + realized P&L). */
+  /** What user receives if they SELL all remaining shares now. Equal to markValueCents for CLAIMABLE. Field name is historical. */
   claimableCents: string | null;
 }
 
