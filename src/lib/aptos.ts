@@ -1135,19 +1135,24 @@ const ADMIN_MAX_GAS = {
 } as const;
 
 /**
- * Admin gas price. Testnet validators accept 1 octa/unit (network estimate
- * is 100 but `deprioritized_gas_estimate` floor is effectively 0). Setting
- * 1 reduces cron burn 100× vs SDK default (100).
+ * Admin gas price (octas/unit). Aptos testnet now enforces a minimum of
+ * 100 — lower values get rejected at validation with
+ * `GAS_UNIT_PRICE_BELOW_MIN_BOUND`. Network's `deprioritized_gas_estimate`
+ * is currently 100 (queried 2026-04-25 via /v1/estimate_gas_price); used to
+ * be effectively 0, hence the older `gasUnitPrice: 1` setting. Raised here
+ * to match the current floor.
  *
- * Guarded by `APTOS_NETWORK`: mainnet has a market-based minimum and would
- * reject `gasUnitPrice: 1`, so keep the SDK default there.
+ * Cost impact: SPAWN_RECURRING_3MIN ~52k units × 100 = 0.0052 APT/spawn.
+ * Admin's 150 APT balance covers ~28k spawns before needing refill.
+ *
+ * Mainnet stays on SDK default (market-based) since min varies.
  *
  * User-signed txns (Petra/OKX buy/sell/claim) are unaffected — wallets set
  * their own price. This only applies to admin cron txns.
  */
 function adminGasUnitPrice(): number | undefined {
   const net = (process.env.APTOS_NETWORK ?? "testnet").toLowerCase();
-  return net === "testnet" || net === "devnet" ? 1 : undefined;
+  return net === "testnet" || net === "devnet" ? 100 : undefined;
 }
 
 function adminOptions(maxGasAmount: number) {
