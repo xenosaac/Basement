@@ -49,7 +49,11 @@ export interface EventDrivenSpec {
 }
 
 export interface SeriesStaticConfig {
-  seriesId: SeriesId;
+  // Was strict `SeriesId` literal union; relaxed to `string` so DB-driven
+  // series_v3 rows (whose ids are dynamic — e.g. sol-15m-strike-up — and
+  // grow over time) can flow through the same shape without forcing the
+  // SeriesId union to enumerate every Phase D/G addition.
+  seriesId: string;
   assetSymbol: string;
   pair: string;
   category: SeriesCategory;
@@ -77,6 +81,17 @@ export interface SeriesStaticConfig {
 // All series share this anchor so round_idx aligns across cadences.
 export const SERIES_START_ANCHOR_SEC = 1776988800;
 
+/**
+ * @deprecated As of v0.5+, the source of truth for active series is the
+ * `series_v3` DB table — `/api/series` reads it directly via cachedView.
+ * This const is retained for:
+ *   1. First-time DB seed (`npm run db:seed`) on a fresh dev environment.
+ *   2. Helper consumers (e.g. `cron/tick`) that still iterate the static
+ *      list. Those callsites should migrate to a DB query when convenient.
+ *
+ * **Adding a new series**: do NOT append here. Either INSERT directly into
+ * `series_v3` or use the future `npm run seed:series add` CLI (Phase B).
+ */
 export const SERIES_CONFIG: readonly SeriesStaticConfig[] = [
   {
     seriesId: "btc-usdc-3m",

@@ -1,25 +1,72 @@
 import { NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
-import { casesV3 } from "@/db/schema";
+import { casesV3, seriesV3 } from "@/db/schema";
 import {
-  SERIES_CONFIG,
   computeCurrentRoundIdx,
   computeRoundClose,
   computeRoundStart,
   isMarketOpen,
+  type SeriesStaticConfig,
 } from "@/lib/series-config";
 import { getCachedPrice, pythE8ToCents } from "@/lib/pyth-hermes";
 import { curvePrices } from "@/lib/quant";
-import type { SeriesListResponse, SeriesSummary } from "@/lib/types/v3-api";
+import { cachedView } from "@/lib/aptos-cache";
+import type {
+  SeriesCategory,
+  SeriesListResponse,
+  SeriesSummary,
+} from "@/lib/types/v3-api";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Adapter from a `series_v3` row to the `SeriesStaticConfig` shape that the
+ * downstream helpers (computeRoundIdx, isMarketOpen, etc.) consume. Keeps
+ * the helpers' implementation untouched while letting this endpoint be
+ * driven by the DB instead of the static SERIES_CONFIG const.
+ */
+function rowToConfig(row: typeof seriesV3.$inferSelect): SeriesStaticConfig {
+  return {
+    seriesId: row.seriesId,
+    assetSymbol: row.assetSymbol,
+    pair: row.pair,
+    category: row.category as SeriesCategory,
+    cadenceSec: row.cadenceSec,
+    pythFeedId: row.pythFeedId,
+    seriesStartSec: row.seriesStartSec,
+    marketHoursGated: row.marketHoursGated === 1,
+    feeBps: row.feeBps,
+    sortOrder: row.sortOrder,
+  };
+}
+
+/**
+ * Fetch every active rolling series from the DB. Cached 60s in-process
+ * (Vercel Fluid Compute reuses lambda instances → high hit rate).
+ * Invalidated on any seriesV3 insert by `ensureSeriesV3RowForGroup`.
+ *
+ * ECO (kind='event_driven') series live in their own cron path and
+ * separate UI surface; this endpoint only returns rolling series.
+ */
+async function getActiveRollingSeries(): Promise<SeriesStaticConfig[]> {
+  return cachedView("series:all", 60_000, async () => {
+    const rows = await db
+      .select()
+      .from(seriesV3)
+      .where(eq(seriesV3.isActive, 1));
+    return rows
+      .filter((r) => r.kind == null || r.kind === "rolling")
+      .map(rowToConfig);
+  });
+}
+
 export async function GET() {
   const nowSec = Math.floor(Date.now() / 1000);
+  const configs = await getActiveRollingSeries();
 
   const summaries: SeriesSummary[] = await Promise.all(
-    SERIES_CONFIG.map(async (s): Promise<SeriesSummary> => {
+    configs.map(async (s): Promise<SeriesSummary> => {
       const currentRoundIdx = computeCurrentRoundIdx(s, nowSec);
       const startTimeSec = computeRoundStart(s, currentRoundIdx);
       const closeTimeSec = computeRoundClose(s, currentRoundIdx);

@@ -27,6 +27,7 @@ import {
   type MarketGroupSpec,
 } from "@/lib/market-groups";
 import { settlementDisplayPrices } from "@/lib/market-settlement";
+import { invalidateCache } from "@/lib/aptos-cache";
 import type { MarketWithPrices, MarketsResponse } from "@/types";
 
 const VALID_STATES: readonly string[] = ["OPEN", "CLOSED", "RESOLVED", "SETTLED"];
@@ -121,10 +122,39 @@ export interface UpsertRecurringInput {
 }
 
 /**
+ * Cadence (full round duration in seconds) derived from a group's spawn
+ * strategy. Distinct from `payload.durationSec` which is "time-to-close
+ * for THIS spawn" (variable: e.g. spawning a `next-15m` round at :09 has
+ * 6min until close, not 15min). Cadence is the steady-state interval
+ * between consecutive round closes, used by /api/series + UI countdown.
+ */
+function cadenceFromGroupSpec(spec: MarketGroupSpec): number {
+  const s = spec.spawnStrategy;
+  if (s.kind === "spawn_recurring_3min") return 180;
+  if (s.kind === "create_market_dynamic_strike") {
+    switch (s.closeAnchor) {
+      case "next-15m":
+        return 900;
+      case "next-1h":
+        return 3600;
+      case "daily-ny-noon":
+      case "daily-ny-4pm":
+      case "daily-ny-midnight":
+        return 86_400;
+    }
+  }
+  if (s.kind === "create_market") return 86_400; // legacy daily groups
+  return 3600; // sensible default
+}
+
+/**
  * Lazily upsert a `series_v3` row for a v0.5 dynamic-strike market group.
  * Idempotent — `onConflictDoNothing` on the seriesId PK so concurrent spawns
  * are safe. Used only for groups whose seriesId == groupId (Phase D
  * convention; pre-v0.5 legacy seriesIds keep their own bespoke ids).
+ *
+ * Invalidates the `series:all` cache on insert so /api/series picks up the
+ * new row immediately rather than waiting out the 60s TTL.
  */
 async function ensureSeriesV3RowForGroup(
   spec: MarketGroupSpec,
@@ -134,11 +164,8 @@ async function ensureSeriesV3RowForGroup(
   // groups are 1:1 with seriesV3 rows — earlier 3m/legacy seriesIds carry
   // their own pair-based ids ("btc-usdc-3m") and predate this helper.
   const seriesId = spec.groupId;
+  const cadenceSec = cadenceFromGroupSpec(spec);
 
-  // Cadence in seconds for the cron poll interval — equal to durationSec
-  // for v0.5 (one round per duration). seriesStartSec anchors round_idx
-  // computations; for spawn-recurring groups the v3 round_idx is set
-  // explicitly per spawn (round_idx == case_id), so the anchor is informational.
   await db
     .insert(seriesV3)
     .values({
@@ -146,7 +173,7 @@ async function ensureSeriesV3RowForGroup(
       assetSymbol: spec.assetSymbol,
       pair: `${spec.assetSymbol}/USDC`,
       category: payload.seriesCategory,
-      cadenceSec: payload.durationSec,
+      cadenceSec,
       pythFeedId: payload.pythFeedId,
       seriesStartSec: payload.startTimeSec,
       marketHoursGated:
@@ -167,6 +194,10 @@ async function ensureSeriesV3RowForGroup(
       kind: "rolling",
     })
     .onConflictDoNothing();
+
+  // Drop the cached /api/series snapshot so the new row surfaces in UI on
+  // the very next request rather than waiting out the 60s TTL.
+  invalidateCache("series:all");
 }
 
 export async function upsertRecurringMarketRowFromChain({

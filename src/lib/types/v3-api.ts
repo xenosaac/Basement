@@ -11,7 +11,15 @@
 
 // ─── Series ───────────────────────────────────────────────
 
-export type SeriesId =
+/**
+ * Series identifier. Was a strict literal union of the 7 v0 seriesIds, but
+ * v0.5+ adds dynamic ids (sol-15m-strike-up, future BNB groups, etc.) via
+ * Phase D's lazy-create path, so we relax to `string`. The literal union
+ * below stays as a documented hint of the original v0 set; new ids should
+ * NOT be added here — they live in `series_v3` DB rows.
+ */
+export type SeriesId = string;
+export type LegacySeriesId =
   | "btc-usdc-3m"
   | "eth-usdc-3m"
   | "sol-usdc-3m"
