@@ -12,7 +12,7 @@ import {
   type SQL,
 } from "drizzle-orm";
 import { db } from "@/db";
-import { markets } from "@/db/schema";
+import { casesV3, markets, seriesV3 } from "@/db/schema";
 import {
   aptos,
   moduleAddress,
@@ -75,16 +75,104 @@ export function parseMarketsSearchParams(searchParams: URLSearchParams): Markets
  * closes any older OPEN row in the same group (prevents two-cards-one-group).
  * ------------------------------------------------------------------------ */
 
+/**
+ * Phase D dynamic-strike spawn payload. When present, the upsert helper
+ * additionally writes a `cases_v3` row carrying the strike-kind capture +
+ * barrier prices + vol-estimator audit fields, lazily ensuring a `series_v3`
+ * row exists for the group (so the FK on `cases_v3.series_id` holds).
+ *
+ * Legacy strategies (`spawn_recurring_3min` / `create_market`) leave this
+ * undefined and only write `markets` — preserving v0.5 backward compat.
+ */
+export interface DynamicStrikeUpsert {
+  /** 'absolute_above' | 'absolute_below' | 'barrier_two_sided'. */
+  strikeKind: string;
+  /** Round duration hint in seconds (15min=900, 1h=3600, 1d=86400). */
+  durationSec: number;
+  /** Spawn time (Unix sec). */
+  startTimeSec: number;
+  /** UI-side category for the new seriesV3 row. Falls back to 'crypto_ext'
+   *  when the group's category doesn't map cleanly to seriesV3 enum. */
+  seriesCategory: "quick_play" | "commodity" | "stocks" | "crypto_ext";
+  /** Pyth feed id (lowercase hex, no 0x). Used for both seriesV3 and cases. */
+  pythFeedId: string;
+  /** Per-Pyth-expo strike price (raw integer at `spec.priceExpo`). For
+   *  barrier cases this is the upper barrier — kept for chain-side display
+   *  parity. v0 settles in DB so the casesV3 columns drive resolution. */
+  strikePriceE8: bigint;
+  /** Lower barrier (only for barrier_two_sided). NULL otherwise. */
+  barrierLowPriceE8?: bigint | null;
+  /** Upper barrier (only for barrier_two_sided). NULL otherwise. */
+  barrierHighPriceE8?: bigint | null;
+  /** Vol-estimator source tag ('samples' | 'fallback'). */
+  volSourceTag: string;
+  /** Vol freshness flag (0/1) at spawn time. */
+  volIsFresh: 0 | 1;
+}
+
 export interface UpsertRecurringInput {
   spec: MarketGroupSpec;
   event: MarketCreatedEvent;
   state?: "OPEN" | "CLOSED";
+  /** Optional Phase D dynamic-strike payload. When provided, the helper
+   *  additionally upserts a `cases_v3` row + `series_v3` lazy row. */
+  dynamic?: DynamicStrikeUpsert;
+}
+
+/**
+ * Lazily upsert a `series_v3` row for a v0.5 dynamic-strike market group.
+ * Idempotent — `onConflictDoNothing` on the seriesId PK so concurrent spawns
+ * are safe. Used only for groups whose seriesId == groupId (Phase D
+ * convention; pre-v0.5 legacy seriesIds keep their own bespoke ids).
+ */
+async function ensureSeriesV3RowForGroup(
+  spec: MarketGroupSpec,
+  payload: DynamicStrikeUpsert,
+): Promise<void> {
+  // Use the spec's groupId verbatim as the series_v3.seriesId. New v0.5
+  // groups are 1:1 with seriesV3 rows — earlier 3m/legacy seriesIds carry
+  // their own pair-based ids ("btc-usdc-3m") and predate this helper.
+  const seriesId = spec.groupId;
+
+  // Cadence in seconds for the cron poll interval — equal to durationSec
+  // for v0.5 (one round per duration). seriesStartSec anchors round_idx
+  // computations; for spawn-recurring groups the v3 round_idx is set
+  // explicitly per spawn (round_idx == case_id), so the anchor is informational.
+  await db
+    .insert(seriesV3)
+    .values({
+      seriesId,
+      assetSymbol: spec.assetSymbol,
+      pair: `${spec.assetSymbol}/USDC`,
+      category: payload.seriesCategory,
+      cadenceSec: payload.durationSec,
+      pythFeedId: payload.pythFeedId,
+      seriesStartSec: payload.startTimeSec,
+      marketHoursGated:
+        spec.spawnStrategy.kind === "create_market_dynamic_strike" &&
+        spec.spawnStrategy.marketHours &&
+        spec.spawnStrategy.marketHours !== "always"
+          ? 1
+          : 0,
+      feeBps:
+        spec.spawnStrategy.kind === "create_market_dynamic_strike"
+          ? spec.spawnStrategy.feeBps
+          : 200,
+      sortOrder: 100,
+      isActive: spec.active ? 1 : 0,
+      groupId: spec.groupId,
+      durationSecHint: payload.durationSec,
+      strikeKind: payload.strikeKind,
+      kind: "rolling",
+    })
+    .onConflictDoNothing();
 }
 
 export async function upsertRecurringMarketRowFromChain({
   spec,
   event,
   state = "OPEN",
+  dynamic,
 }: UpsertRecurringInput): Promise<void> {
   const closeTimeSec = Number(event.closeTime);
   const question = renderQuestion(spec, event.strikePrice, closeTimeSec);
@@ -144,6 +232,48 @@ export async function upsertRecurringMarketRowFromChain({
         updatedAt: new Date(),
       },
     });
+
+  // ── v0.5 Phase D — dynamic-strike casesV3 shadow row ─────────────────
+  // The legacy markets table is the on-chain mirror; cases_v3 is the
+  // settle-side source of truth (Phase E reads it). For dynamic-strike
+  // groups we lazily ensure the seriesV3 row + write a cases_v3 row keyed
+  // by (groupId-as-seriesId, caseId-as-roundIdx). Best-effort: failure
+  // here logs but doesn't block the markets-table insert which already
+  // succeeded.
+  if (dynamic) {
+    try {
+      await ensureSeriesV3RowForGroup(spec, dynamic);
+      await db
+        .insert(casesV3)
+        .values({
+          seriesId: spec.groupId,
+          // case_id is a u64 from chain — fits in JS number for v0 demo
+          // volumes. If chain case_id ever exceeds Number.MAX_SAFE_INTEGER
+          // we'd need to switch roundIdx to bigint mode, but that's a v1
+          // schema change.
+          roundIdx: Number(event.caseId),
+          startTimeSec: dynamic.startTimeSec,
+          closeTimeSec,
+          strikePriceE8: dynamic.strikePriceE8,
+          // strikeCents: USDC-cent rendering for non-PCT feeds. Pyth e8
+          // → cents = e8 / 1e6. Matches `pythE8ToCents` semantics.
+          strikeCents: dynamic.strikePriceE8 / 1_000_000n,
+          state,
+          strikeKindCaptured: dynamic.strikeKind,
+          barrierLowPriceE8: dynamic.barrierLowPriceE8 ?? null,
+          barrierHighPriceE8: dynamic.barrierHighPriceE8 ?? null,
+          volSourceTag: dynamic.volSourceTag,
+          volIsFresh: dynamic.volIsFresh,
+        })
+        .onConflictDoNothing();
+    } catch (err) {
+      console.error(
+        `[upsertRecurringMarketRowFromChain] cases_v3 shadow upsert failed for ` +
+          `${spec.groupId} caseId=${event.caseId.toString()}:`,
+        err,
+      );
+    }
+  }
 }
 
 /* Reconcile DB with on-chain active cases for each known group.
