@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { and, eq, lte, sql } from "drizzle-orm";
+import { and, eq, gt, lte, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
   casesV3,
@@ -294,7 +294,7 @@ async function resolveCase(
         }
       }
 
-      // Mark case RESOLVED / VOID. That's it — no balance, no PnL writes.
+      // Mark case RESOLVED / VOID. Balance untouched (sell-to-redeem).
       await tx
         .update(casesV3)
         .set({
@@ -309,6 +309,31 @@ async function resolveCase(
             eq(casesV3.roundIdx, roundIdx),
           ),
         );
+
+      // Record losses for losing positions. Without this write, a loss never
+      // enters realized_pnl_cents — the user has no reason to sell shares
+      // that are worth $0, so the loss would silently be excluded from
+      // Lifetime PnL / Leaderboard PnL aggregations forever. Winning side is
+      // intentionally left untouched: the redemption PnL is booked at sell
+      // time by /api/sell (sell-to-redeem invariant). VOID skips this — the
+      // user can still sell at cost-basis refund.
+      if (outcome === "UP" || outcome === "DOWN") {
+        const losingSide = outcome === "UP" ? "DOWN" : "UP";
+        await tx
+          .update(positionsV3)
+          .set({
+            realizedPnlCents: sql`${positionsV3.realizedPnlCents} - ${positionsV3.costBasisCents}`,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(positionsV3.seriesId, series.seriesId),
+              eq(positionsV3.roundIdx, roundIdx),
+              eq(positionsV3.side, losingSide),
+              gt(positionsV3.sharesE8, 0n),
+            ),
+          );
+      }
 
       report.roundsResolved.push({
         seriesId: series.seriesId,

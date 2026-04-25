@@ -385,6 +385,36 @@ export default function RoundDetailPage() {
               const payout = o.payoutCents != null ? Number(o.payoutCents) : null;
               const cost = isBuy ? Number(o.amountCents) : 0;
               const profit = payout != null ? payout - cost : null;
+              // Trade status is derived from case state + outcome, NOT from
+              // payoutCents (which is only written for sells; buys carry no
+              // explicit payout under the sell-to-redeem model).
+              //   OPEN              → "pending"
+              //   VOID              → "voided"
+              //   RESOLVED + sell   → centsToUsd(payoutCents) (already booked)
+              //   RESOLVED + buy on winning side  → "won → redeem"
+              //   RESOLVED + buy on losing side   → "lost"
+              const statusLabel = ((): string => {
+                if (data.state === "OPEN") return "pending";
+                if (data.state === "VOID") return "voided";
+                // RESOLVED
+                if (!isBuy) return centsToUsd(payout ?? 0);
+                if (data.resolvedOutcome === o.side) return "won → redeem";
+                return "lost";
+              })();
+              const statusTone =
+                data.state === "OPEN"
+                  ? "text-white/30"
+                  : data.state === "VOID"
+                    ? "text-white/40"
+                    : !isBuy
+                      ? profit != null && profit > 0
+                        ? "text-yes"
+                        : profit != null && profit < 0
+                          ? "text-no"
+                          : "text-white/40"
+                      : data.resolvedOutcome === o.side
+                        ? "text-yes"
+                        : "text-no";
               return (
                 <div
                   key={o.orderId}
@@ -409,21 +439,9 @@ export default function RoundDetailPage() {
                     {centsToUsd(isBuy ? o.amountCents : o.amountCents)}
                   </span>
                   <span
-                    className={`text-xs font-mono tabular-nums ${
-                      profit == null
-                        ? "text-white/30"
-                        : profit > 0
-                          ? "text-yes"
-                          : profit < 0
-                            ? "text-no"
-                            : "text-white/40"
-                    }`}
+                    className={`text-xs font-mono tabular-nums ${statusTone}`}
                   >
-                    {payout == null
-                      ? "pending"
-                      : isBuy
-                        ? `→ ${centsToUsd(payout)}`
-                        : centsToUsd(payout)}
+                    {statusLabel}
                   </span>
                 </div>
               );
