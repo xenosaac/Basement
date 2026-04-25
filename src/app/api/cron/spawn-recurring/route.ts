@@ -5,6 +5,8 @@
 
 import { NextResponse } from "next/server";
 
+import { db } from "@/db";
+import { priceTicksV3 } from "@/db/schema";
 import {
   aptos,
   buildCreateMarketTxn,
@@ -22,10 +24,23 @@ import {
   activeGroupsByCadence,
   deriveMarketParams,
   isMarketOpen,
+  nextNyFourPmUtc,
+  nextNyMidnightUtc,
+  nextNyNoonUtc,
+  nextQuarterHourUtc,
+  nextTopOfHourUtc,
   pythFeedForGroup,
+  THRESHOLD_ABOVE,
+  THRESHOLD_BELOW,
   type MarketGroupSpec,
 } from "@/lib/market-groups";
-import { upsertRecurringMarketRowFromChain } from "@/lib/markets-query";
+import {
+  upsertRecurringMarketRowFromChain,
+  type DynamicStrikeUpsert,
+} from "@/lib/markets-query";
+import { computeBarrierStrike } from "@/lib/quant/barrier-strike";
+import { isMacroBlackout } from "@/lib/quant/macro-calendar";
+import { computeRealizedVol7d } from "@/lib/quant/vol-estimator";
 
 /**
  * Parse a Pyth Hermes VAA and extract the current price (signed i64 scaled
@@ -67,6 +82,232 @@ async function fetchCurrentPrice(feedId: string): Promise<bigint> {
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Map a `closeAnchor` literal to the corresponding "next anchor" computer.
+ * Centralised so both the spawn cron and any future caller share the same
+ * mapping. `daily-ny-midnight` keeps backward compat with the legacy XAU
+ * daily strikes — same anchor, same UTC-second result.
+ */
+function nextAnchorUtc(
+  anchor:
+    | "next-15m"
+    | "next-1h"
+    | "daily-ny-noon"
+    | "daily-ny-4pm"
+    | "daily-ny-midnight",
+  nowUtcSec: number,
+): number {
+  switch (anchor) {
+    case "next-15m":
+      return nextQuarterHourUtc(nowUtcSec);
+    case "next-1h":
+      return nextTopOfHourUtc(nowUtcSec);
+    case "daily-ny-noon":
+      return nextNyNoonUtc(nowUtcSec);
+    case "daily-ny-4pm":
+      return nextNyFourPmUtc(nowUtcSec);
+    case "daily-ny-midnight":
+      return nextNyMidnightUtc(nowUtcSec);
+  }
+}
+
+/** Map a registry `Category` to the `series_v3.category` enum. The seriesV3
+ *  enum lacks an `others` value — forex falls into `crypto_ext` for v0.5 (a
+ *  proper enum extension is Phase F's territory). */
+function seriesCategoryFor(spec: MarketGroupSpec):
+  | "quick_play"
+  | "commodity"
+  | "stocks"
+  | "crypto_ext" {
+  if (spec.category === "commodity") return "commodity";
+  if (spec.category === "stocks") return "stocks";
+  return "crypto_ext"; // crypto + forex(others)
+}
+
+/**
+ * Phase D: derive a dynamic-strike spawn payload using vol-estimator +
+ * barrier-strike. Async because vol-estimator hits the DB. Returns `null`
+ * to signal "skip this round" (e.g. macro blackout). All numbers in USD
+ * floats internally; chain-side `strikePriceRaw` is rebuilt from the chosen
+ * strike at the end.
+ */
+interface DynamicSpawnDerivation {
+  strikePriceRaw: bigint;
+  thresholdType: 0 | 1;
+  closeTime: number;
+  durationSec: number;
+  /** Captured for casesV3 shadow row. */
+  shadow: {
+    strikeKind: string;
+    strikePriceE8: bigint;
+    barrierLowPriceE8: bigint | null;
+    barrierHighPriceE8: bigint | null;
+    volSourceTag: string;
+    volIsFresh: 0 | 1;
+  };
+}
+
+async function deriveDynamicSpawnParams(
+  spec: MarketGroupSpec,
+  priceRaw: bigint,
+  priceExpo: number,
+  nowUtcSec: number,
+): Promise<DynamicSpawnDerivation | { skip: string }> {
+  if (spec.spawnStrategy.kind !== "create_market_dynamic_strike") {
+    throw new Error(
+      `[spawn-recurring] deriveDynamicSpawnParams called for non-dynamic ` +
+        `strategy ${spec.spawnStrategy.kind} (${spec.groupId})`,
+    );
+  }
+  const strategy = spec.spawnStrategy;
+  if (priceExpo !== strategy.pythExpo) {
+    throw new Error(
+      `[spawn-recurring] expo mismatch for ${spec.groupId}: feed=${priceExpo} ` +
+        `spec=${strategy.pythExpo}`,
+    );
+  }
+
+  // 1. Compute closeTime + tenor from the anchor.
+  const closeTime = nextAnchorUtc(strategy.closeAnchor, nowUtcSec);
+  const tenorSec = closeTime - nowUtcSec;
+  if (tenorSec <= 0) {
+    throw new Error(
+      `[spawn-recurring] anchor returned non-positive tenor (${tenorSec}s) ` +
+        `for ${spec.groupId} (${strategy.closeAnchor})`,
+    );
+  }
+
+  // 2. Macro blackout — skip spawn cleanly so the next cron tick retries.
+  const blackout = isMacroBlackout(spec.assetSymbol, nowUtcSec);
+  if (blackout.blackout) {
+    return { skip: `macro blackout: ${blackout.reason ?? "unknown"}` };
+  }
+
+  // 3. Vol estimate. Falls back to ASSET_PARAMS default σ when there are <5
+  //    samples — `isFresh=false` flags the audit but doesn't block spawn.
+  const vol = await computeRealizedVol7d(spec.groupId, nowUtcSec);
+
+  // 4. P0 in USD float — used by computeBarrierStrike. priceExpo is negative
+  //    for crypto/commodity (-8), QQQ/forex (-5).
+  const P0Usd = Number(priceRaw) * Math.pow(10, priceExpo);
+  if (!(P0Usd > 0)) {
+    throw new Error(
+      `[spawn-recurring] non-positive P0Usd ${P0Usd} from priceRaw=${priceRaw} ` +
+        `expo=${priceExpo} for ${spec.groupId}`,
+    );
+  }
+
+  // 5. Branch by strike kind.
+  const expoPower = Math.pow(10, -priceExpo); // priceExpo=-8 → 1e8
+  const e8Power = 1e8;
+
+  if (strategy.strikeKind === "barrier_two_sided") {
+    const up = computeBarrierStrike({
+      asset: spec.assetSymbol,
+      side: "UP",
+      tenorSec,
+      P0: P0Usd,
+      sigmaAnnual: vol.sigmaAnnual,
+      asOfSec: nowUtcSec,
+    });
+    const down = computeBarrierStrike({
+      asset: spec.assetSymbol,
+      side: "DOWN",
+      tenorSec,
+      P0: P0Usd,
+      sigmaAnnual: vol.sigmaAnnual,
+      asOfSec: nowUtcSec,
+    });
+    // chain-side strike_price placeholder = upper barrier (at feed expo).
+    // v0 settles in DB; chain settle is unused for barrier_two_sided.
+    const strikePriceRaw = BigInt(Math.round(up.strikePrice * expoPower));
+    const upperE8 = BigInt(Math.round(up.strikePrice * e8Power));
+    const lowerE8 = BigInt(Math.round(down.strikePrice * e8Power));
+    return {
+      strikePriceRaw,
+      thresholdType: THRESHOLD_ABOVE as 0,
+      closeTime,
+      durationSec: tenorSec,
+      shadow: {
+        strikeKind: "barrier_two_sided",
+        strikePriceE8: upperE8, // chain-display parity; settle uses both barriers
+        barrierLowPriceE8: lowerE8,
+        barrierHighPriceE8: upperE8,
+        volSourceTag: vol.source,
+        volIsFresh: vol.isFresh ? 1 : 0,
+      },
+    };
+  }
+
+  // absolute_above / absolute_below
+  const side = strategy.strikeKind === "absolute_above" ? "UP" : "DOWN";
+  const strike = computeBarrierStrike({
+    asset: spec.assetSymbol,
+    side,
+    tenorSec,
+    P0: P0Usd,
+    sigmaAnnual: vol.sigmaAnnual,
+    asOfSec: nowUtcSec,
+  });
+  const strikePriceRaw = BigInt(Math.round(strike.strikePrice * expoPower));
+  const strikePriceE8 = BigInt(Math.round(strike.strikePrice * e8Power));
+  const thresholdType: 0 | 1 =
+    strategy.strikeKind === "absolute_above"
+      ? (THRESHOLD_ABOVE as 0)
+      : (THRESHOLD_BELOW as 1);
+
+  return {
+    strikePriceRaw,
+    thresholdType,
+    closeTime,
+    durationSec: tenorSec,
+    shadow: {
+      strikeKind: strategy.strikeKind,
+      strikePriceE8,
+      barrierLowPriceE8: null,
+      barrierHighPriceE8: null,
+      volSourceTag: vol.source,
+      volIsFresh: vol.isFresh ? 1 : 0,
+    },
+  };
+}
+
+/** Insert a Pyth tick into `price_ticks_v3` (idempotent on the unique
+ *  `(feedId, publishTimeSec)` index). Best-effort — feeds the vol-estimator
+ *  rolling window for the next spawn cycle. Failure is logged + swallowed
+ *  because spawn success doesn't depend on tick history persistence. */
+async function recordPriceTickBestEffort(
+  feedId: string,
+  priceRaw: bigint,
+  priceExpo: number,
+  publishTimeSec: number,
+): Promise<void> {
+  try {
+    // priceTicksV3 stores priceE8 (Pyth canonical scale). When Pyth's expo
+    // differs from -8 (e.g. -5 for QQQ/forex), rescale to e8 so all rows
+    // share a unit and the vol-estimator's log-return math stays correct.
+    const priceE8 =
+      priceExpo === -8
+        ? priceRaw
+        : BigInt(Math.round(Number(priceRaw) * Math.pow(10, 8 + priceExpo)));
+    const lower =
+      feedId.startsWith("0x") ? feedId.slice(2).toLowerCase() : feedId.toLowerCase();
+    await db
+      .insert(priceTicksV3)
+      .values({
+        pythFeedId: lower,
+        priceE8,
+        publishTimeSec,
+      })
+      .onConflictDoNothing();
+  } catch (err) {
+    console.error(
+      `[spawn-recurring] price_ticks_v3 insert failed for ${feedId}:`,
+      err,
+    );
+  }
+}
+
 export async function GET(req: Request): Promise<Response> {
   const auth = req.headers.get("authorization") ?? "";
   const expected = `Bearer ${process.env.CRON_SECRET ?? ""}`;
@@ -88,6 +329,8 @@ export async function GET(req: Request): Promise<Response> {
         payload: InputTransactionData;
         durationSec: number;
         spec: MarketGroupSpec;
+        /** Phase D dynamic-strike payload to plumb through to the DB upsert. */
+        dynamic?: DynamicStrikeUpsert;
       };
 
   const nowUtcSec = Math.floor(Date.now() / 1000);
@@ -98,6 +341,8 @@ export async function GET(req: Request): Promise<Response> {
       try {
         // Commodity / stocks gate: skip spawning outside market hours so
         // new cases don't spend their lifetime on a stale frozen price.
+        // For v0.5 dynamic-strike groups, isMarketOpen consults the
+        // strategy.marketHours field (rth-only / fx-24x5 / always).
         if (!isMarketOpen(group, nowUtcSec)) {
           return {
             groupId: group.groupId,
@@ -133,7 +378,8 @@ export async function GET(req: Request): Promise<Response> {
 
         // Branch by spawnStrategy. Legacy spawn_recurring_3min keeps the
         // hardcoded 180s close; create_market pulls expo-aware price from
-        // Hermes and runs it through deriveMarketParams.
+        // Hermes and runs it through deriveMarketParams. v0.5 Phase D adds
+        // create_market_dynamic_strike — async derivation with quant hooks.
         const strategy = group.spawnStrategy;
         if (strategy.kind === "spawn_recurring_3min") {
           const [price] = await Promise.all([
@@ -155,8 +401,73 @@ export async function GET(req: Request): Promise<Response> {
           };
         }
 
-        // create_market path — XAU up/down, future strike-based groups.
-        const { price, expo } = await fetchPythPrice(group.feedId);
+        if (strategy.kind === "create_market_dynamic_strike") {
+          // v0.5 Phase D — quant-driven strike + barrier write.
+          const { price, expo, publishTime } = await fetchPythPrice(group.feedId);
+          // Best-effort: feed the vol-estimator rolling window. Doesn't
+          // block this spawn but unlocks the next cycle's σ samples.
+          await recordPriceTickBestEffort(
+            group.feedId,
+            price,
+            expo,
+            publishTime,
+          );
+
+          const derived = await deriveDynamicSpawnParams(
+            group,
+            price,
+            expo,
+            nowUtcSec,
+          );
+          if ("skip" in derived) {
+            return {
+              groupId: group.groupId,
+              kind: "skip",
+              reason: derived.skip,
+            };
+          }
+
+          const dynamicPayload: DynamicStrikeUpsert = {
+            strikeKind: derived.shadow.strikeKind,
+            durationSec: derived.durationSec,
+            startTimeSec: nowUtcSec,
+            seriesCategory: seriesCategoryFor(group),
+            pythFeedId: group.feedId.startsWith("0x")
+              ? group.feedId.slice(2).toLowerCase()
+              : group.feedId.toLowerCase(),
+            strikePriceE8: derived.shadow.strikePriceE8,
+            barrierLowPriceE8: derived.shadow.barrierLowPriceE8,
+            barrierHighPriceE8: derived.shadow.barrierHighPriceE8,
+            volSourceTag: derived.shadow.volSourceTag,
+            volIsFresh: derived.shadow.volIsFresh,
+          };
+
+          return {
+            groupId: group.groupId,
+            kind: "ready",
+            payload: buildCreateMarketTxn({
+              assetPythFeedId: group.feedId,
+              strikePriceRaw: derived.strikePriceRaw,
+              closeTimeSec: derived.closeTime,
+              recurringGroupId: group.groupId,
+              recurringAutoSpawn: false,
+              recurringDurationSeconds: derived.durationSec,
+              marketType: strategy.marketType,
+              thresholdType: derived.thresholdType,
+              feeBps: strategy.feeBps,
+              poolDepth: group.poolDepth,
+              maxTradeBps: strategy.maxTradeBps,
+              maxStalenessSec: strategy.maxStalenessSec,
+            }),
+            durationSec: derived.durationSec,
+            spec: group,
+            dynamic: dynamicPayload,
+          };
+        }
+
+        // Legacy create_market path — XAU up/down, future strike-based groups.
+        const { price, expo, publishTime } = await fetchPythPrice(group.feedId);
+        await recordPriceTickBestEffort(group.feedId, price, expo, publishTime);
         const derived = deriveMarketParams(group, price, expo, nowUtcSec);
         return {
           groupId: group.groupId,
@@ -235,7 +546,11 @@ export async function GET(req: Request): Promise<Response> {
           events.find((e) => e.recurringGroupId === p.spec.groupId) ?? events[0];
         if (event) {
           caseId = event.caseId.toString();
-          await upsertRecurringMarketRowFromChain({ spec: p.spec, event });
+          await upsertRecurringMarketRowFromChain({
+            spec: p.spec,
+            event,
+            dynamic: p.dynamic,
+          });
           dbWritten = true;
         } else {
           console.warn(

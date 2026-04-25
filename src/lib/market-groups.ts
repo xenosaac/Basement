@@ -333,7 +333,11 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
       maxTradeBps: 500,
     },
     questionTemplate: "Will Solana break above {strike} in the next 15 minutes?",
-    active: false,
+    // v0.5 Phase D — flipped on as the smallest blast radius for verifying
+    // the dynamic-strike spawn pipeline (3 SOL cards). Subsequent batches
+    // (hourly assets, forex, daily) stay `active: false` until ops confirms
+    // 24h of clean spawn / settle behaviour.
+    active: true,
   },
   "sol-15m-strike-down": {
     groupId: "sol-15m-strike-down",
@@ -361,7 +365,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
       maxTradeBps: 500,
     },
     questionTemplate: "Will Solana break below {strike} in the next 15 minutes?",
-    active: false,
+    active: true,
   },
   "sol-15m-barrier": {
     groupId: "sol-15m-barrier",
@@ -390,7 +394,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     },
     questionTemplate:
       "Will Solana break out of the barrier range in the next 15 minutes?",
-    active: false,
+    active: true,
   },
 
   "hype-1h-up": {
@@ -1149,9 +1153,81 @@ export function pythFeedForGroup(spec: MarketGroupSpec): string {
   }
 }
 
+/** Result of {@link isMarketHoursOpen}. `false` carries a reason string for
+ *  cron-side logging. */
+export type MarketHoursMode = "always" | "rth-only" | "fx-24x5";
+
+/**
+ * Pure check: is a `marketHours` mode "open" at `nowUtcSec`?
+ *
+ * - `always`     → 24/7 open (crypto / generic).
+ * - `rth-only`   → NYSE 09:30–16:00 ET, Mon–Fri (used by QQQ daily).
+ * - `fx-24x5`    → Sun 22:00 UTC → Fri 22:00 UTC (forex convention; opens
+ *                  Sunday 17:00 NY = 22:00 UTC, closes Friday 17:00 NY =
+ *                  22:00 UTC). Same window also serves spot commodities
+ *                  (XAU/XAG/XPT/Brent) which honour the global FX session.
+ *
+ * No DST conversion needed for `fx-24x5`: the forex convention is anchored
+ * to UTC clock-time, NOT NY clock-time, so 22:00 UTC stays correct year-round.
+ *
+ * @returns `{open: true}` or `{open: false, reason}`. The reason is
+ *          deliberately short — cron logs it directly.
+ */
+export function isMarketHoursOpen(
+  mode: MarketHoursMode | undefined,
+  nowUtcSec: number,
+): { open: true } | { open: false; reason: string } {
+  const m = mode ?? "always";
+  if (m === "always") return { open: true };
+
+  const d = new Date(nowUtcSec * 1000);
+
+  if (m === "fx-24x5") {
+    // Sun 22:00 UTC → Fri 22:00 UTC. Closed window: Fri 22:00 → Sun 22:00.
+    const dow = d.getUTCDay(); // 0=Sun, 5=Fri, 6=Sat
+    const hour = d.getUTCHours();
+    if (dow === 6) return { open: false, reason: "fx weekend (Saturday)" };
+    if (dow === 0 && hour < 22)
+      return { open: false, reason: "fx weekend (Sunday before 22:00 UTC)" };
+    if (dow === 5 && hour >= 22)
+      return { open: false, reason: "fx weekend (Friday 22:00 UTC and after)" };
+    return { open: true };
+  }
+
+  if (m === "rth-only") {
+    // NYSE Regular Trading Hours: Mon–Fri 09:30–16:00 ET.
+    const ny = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(d);
+    const weekday = ny.find((p) => p.type === "weekday")?.value ?? "";
+    let hour = parseInt(ny.find((p) => p.type === "hour")?.value ?? "0", 10);
+    if (hour === 24) hour = 0;
+    const minute = parseInt(ny.find((p) => p.type === "minute")?.value ?? "0", 10);
+    if (weekday === "Sat" || weekday === "Sun")
+      return { open: false, reason: "rth weekend" };
+    const minuteOfDay = hour * 60 + minute;
+    const openMin = 9 * 60 + 30;
+    const closeMin = 16 * 60;
+    if (minuteOfDay < openMin)
+      return { open: false, reason: "rth pre-open" };
+    if (minuteOfDay >= closeMin)
+      return { open: false, reason: "rth post-close" };
+    return { open: true };
+  }
+
+  return { open: true };
+}
+
 /**
  * Returns true when a given market group is tradeable RIGHT NOW.
  *
+ * Strategy-aware: dynamic-strike groups consult `strategy.marketHours` first
+ * (rth-only / fx-24x5 / always). For legacy strategies (`spawn_recurring_3min`
+ * / `create_market`) the per-category default applies:
  * - **Crypto** markets trade 24/7.
  * - **Commodity** (currently XAU gold): Sun 22:00 UTC → Fri 21:00 UTC. Matches
  *   the LBMA + COMEX overlap window. Gold is stale on the weekend, so a 1-hour
@@ -1166,6 +1242,16 @@ export function isMarketOpen(
   spec: MarketGroupSpec,
   nowUtcSec: number,
 ): boolean {
+  // Strategy-level override (v0.5 dynamic-strike groups). When a strategy
+  // declares `marketHours`, that wins — category fallback only applies if
+  // the strategy is silent or it's a legacy strategy variant.
+  if (
+    spec.spawnStrategy.kind === "create_market_dynamic_strike" &&
+    spec.spawnStrategy.marketHours
+  ) {
+    return isMarketHoursOpen(spec.spawnStrategy.marketHours, nowUtcSec).open;
+  }
+
   if (spec.category === "crypto") return true;
 
   if (spec.category === "commodity") {
@@ -1220,20 +1306,28 @@ export function formatUSDStrike(strikePrice: bigint): string {
 }
 
 /**
- * Return the Unix seconds of the NEXT `00:00:00 America/New_York`. Handles
- * DST transitions (EDT/EST) correctly by querying the TZ offset for the
- * target wall-clock moment via {@link Intl.DateTimeFormat}. If the current
- * instant happens to be exactly 00:00 NY, this still advances to the next
- * day's midnight — callers want "the next anchor", not the current one.
+ * Return the Unix seconds of the NEXT `HH:00:00 America/New_York` for an
+ * arbitrary `targetHour` (0–23). Handles DST transitions (EDT/EST) by
+ * querying the TZ offset for the target wall-clock moment via
+ * {@link Intl.DateTimeFormat}.
+ *
+ * If we are already past `targetHour` today (or it's exactly `HH:00:00`)
+ * the function rolls forward to the SAME hour on the next NY calendar day —
+ * callers want "the next anchor", not the current one.
  */
-export function nextNyMidnightUtc(nowUtcSec: number): number {
+export function nextNyHourUtc(nowUtcSec: number, targetHour: number): number {
+  if (!Number.isInteger(targetHour) || targetHour < 0 || targetHour > 23) {
+    throw new Error(`nextNyHourUtc: targetHour out of range: ${targetHour}`);
+  }
   const now = new Date(nowUtcSec * 1000);
-  // 1. Get the CURRENT NY wall-clock date so we know which day we are in.
   const fmt = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
     hour12: false,
   });
   const parts = fmt.formatToParts(now);
@@ -1241,21 +1335,73 @@ export function nextNyMidnightUtc(nowUtcSec: number): number {
   const nyYear = Number(get("year"));
   const nyMonth = Number(get("month"));
   const nyDay = Number(get("day"));
-  // 2. Target = tomorrow's NY calendar date at 00:00:00.
-  const tomorrow = new Date(Date.UTC(nyYear, nyMonth - 1, nyDay + 1));
-  const tY = tomorrow.getUTCFullYear();
-  const tM = tomorrow.getUTCMonth();
-  const tD = tomorrow.getUTCDate();
-  // 3. Convert that wall-clock moment back to UTC. Start with a provisional
-  // UTC anchor (00:00 UTC on target date) + query its NY offset; target =
-  // anchor − offset. US DST transitions happen at 06:00–07:00 UTC, strictly
-  // after 00:00 UTC and after target midnight NY (04:00/05:00 UTC), so the
-  // offset measured at 00:00 UTC is the same as at target midnight NY — a
-  // single iteration gets it right without boundary cases.
-  const anchor = Date.UTC(tY, tM, tD, 0, 0, 0);
+  let nyHour = Number(get("hour"));
+  if (nyHour === 24) nyHour = 0;
+  const nyMinute = Number(get("minute"));
+  const nySecond = Number(get("second"));
+
+  // Decide which NY calendar day the next anchor lands on.
+  let dayOffset = 0;
+  if (
+    nyHour > targetHour ||
+    (nyHour === targetHour && (nyMinute > 0 || nySecond > 0)) ||
+    (nyHour === targetHour && nyMinute === 0 && nySecond === 0)
+  ) {
+    // We are at or past `targetHour:00:00` today → advance one NY day.
+    dayOffset = 1;
+  }
+
+  const targetDate = new Date(Date.UTC(nyYear, nyMonth - 1, nyDay + dayOffset));
+  const tY = targetDate.getUTCFullYear();
+  const tM = targetDate.getUTCMonth();
+  const tD = targetDate.getUTCDate();
+  // Provisional UTC anchor at the target wall-clock hour, then subtract the
+  // NY offset. US DST transitions happen at 07:00 UTC (i.e. 02:00–03:00 ET),
+  // so the offset measured at the anchor moment is consistent with itself
+  // for any targetHour outside [02:00, 03:00] ET on a transition day. v0.5
+  // anchors are 00 / 12 / 16 ET, all safe.
+  const anchor = Date.UTC(tY, tM, tD, targetHour, 0, 0);
   const offsetMin = getTimeZoneOffsetMinutes("America/New_York", anchor);
   const targetMs = anchor - offsetMin * 60_000;
   return Math.floor(targetMs / 1000);
+}
+
+/**
+ * Return the Unix seconds of the NEXT `00:00:00 America/New_York`. Handles
+ * DST transitions (EDT/EST) correctly. Thin wrapper over {@link nextNyHourUtc}.
+ */
+export function nextNyMidnightUtc(nowUtcSec: number): number {
+  return nextNyHourUtc(nowUtcSec, 0);
+}
+
+/**
+ * Next NY noon (12:00 ET). Used by Brent daily close.
+ */
+export function nextNyNoonUtc(nowUtcSec: number): number {
+  return nextNyHourUtc(nowUtcSec, 12);
+}
+
+/**
+ * Next NY 4 PM ET (16:00). Used by NYSE close (QQQ daily).
+ */
+export function nextNyFourPmUtc(nowUtcSec: number): number {
+  return nextNyHourUtc(nowUtcSec, 16);
+}
+
+/**
+ * Next top-of-hour boundary in UTC. Pure arithmetic — no TZ involvement.
+ * `nowUtcSec` at exactly HH:00:00 advances to (HH+1):00:00.
+ */
+export function nextTopOfHourUtc(nowUtcSec: number): number {
+  return Math.ceil((nowUtcSec + 1) / 3600) * 3600;
+}
+
+/**
+ * Next 15-minute (quarter-hour) boundary in UTC. `nowUtcSec` at an exact
+ * boundary advances to the next one.
+ */
+export function nextQuarterHourUtc(nowUtcSec: number): number {
+  return Math.ceil((nowUtcSec + 1) / 900) * 900;
 }
 
 /**

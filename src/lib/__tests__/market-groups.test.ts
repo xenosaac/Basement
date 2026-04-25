@@ -3,9 +3,14 @@ import {
   deriveMarketParams,
   formatUsdFromRaw,
   getTimeZoneOffsetMinutes,
+  isMarketHoursOpen,
   isMarketOpen,
   MARKET_GROUPS,
+  nextNyFourPmUtc,
   nextNyMidnightUtc,
+  nextNyNoonUtc,
+  nextQuarterHourUtc,
+  nextTopOfHourUtc,
   renderQuestion,
   THRESHOLD_ABOVE,
   THRESHOLD_BELOW,
@@ -238,5 +243,166 @@ describe("renderQuestion", () => {
   it("does not touch templates without placeholders", () => {
     const q = renderQuestion(btcSpec, 7814100000000n, utc("2026-04-23T23:53:00"));
     expect(q).toBe("Will Bitcoin go up in the next 3 minutes?");
+  });
+});
+
+// ─── v0.5 Phase D — anchor helpers + market-hours mode ────────────────
+
+describe("nextQuarterHourUtc", () => {
+  it("advances 14:07 → 14:15", () => {
+    expect(nextQuarterHourUtc(utc("2026-04-24T14:07:00"))).toBe(
+      utc("2026-04-24T14:15:00"),
+    );
+  });
+  it("advances exact 14:00 → 14:15 (anchor is in the past at boundary)", () => {
+    expect(nextQuarterHourUtc(utc("2026-04-24T14:00:00"))).toBe(
+      utc("2026-04-24T14:15:00"),
+    );
+  });
+  it("rolls hour: 14:53 → 15:00", () => {
+    expect(nextQuarterHourUtc(utc("2026-04-24T14:53:00"))).toBe(
+      utc("2026-04-24T15:00:00"),
+    );
+  });
+});
+
+describe("nextTopOfHourUtc", () => {
+  it("advances 14:07 → 15:00", () => {
+    expect(nextTopOfHourUtc(utc("2026-04-24T14:07:00"))).toBe(
+      utc("2026-04-24T15:00:00"),
+    );
+  });
+  it("advances exact 14:00 → 15:00", () => {
+    expect(nextTopOfHourUtc(utc("2026-04-24T14:00:00"))).toBe(
+      utc("2026-04-24T15:00:00"),
+    );
+  });
+});
+
+describe("nextNyNoonUtc / nextNyFourPmUtc — DST-aware", () => {
+  it("nextNyNoonUtc during EDT (Apr 24) — 12:00 ET == 16:00 UTC", () => {
+    // Apr 24 2026 14:00 UTC = 10:00 ET (EDT, UTC-4) → next NY noon today @ 16:00 UTC
+    expect(nextNyNoonUtc(utc("2026-04-24T14:00:00"))).toBe(
+      utc("2026-04-24T16:00:00"),
+    );
+  });
+
+  it("nextNyNoonUtc during EDT — already past noon ET rolls to next NY day", () => {
+    // Apr 24 2026 17:00 UTC = 13:00 ET (past noon) → next NY noon = Apr 25 16:00 UTC
+    expect(nextNyNoonUtc(utc("2026-04-24T17:00:00"))).toBe(
+      utc("2026-04-25T16:00:00"),
+    );
+  });
+
+  it("nextNyNoonUtc during EST (Jan 15) — 12:00 ET == 17:00 UTC", () => {
+    // Jan 15 2026 14:00 UTC = 09:00 ET (EST, UTC-5)
+    expect(nextNyNoonUtc(utc("2026-01-15T14:00:00"))).toBe(
+      utc("2026-01-15T17:00:00"),
+    );
+  });
+
+  it("nextNyFourPmUtc during EDT — 16:00 ET == 20:00 UTC", () => {
+    // Apr 24 2026 14:00 UTC = 10:00 ET → next NY 4pm = today 20:00 UTC
+    expect(nextNyFourPmUtc(utc("2026-04-24T14:00:00"))).toBe(
+      utc("2026-04-24T20:00:00"),
+    );
+  });
+
+  it("nextNyFourPmUtc rolls forward when past 16:00 ET", () => {
+    // Apr 24 2026 21:00 UTC = 17:00 ET → next NY 4pm = Apr 25 20:00 UTC
+    expect(nextNyFourPmUtc(utc("2026-04-24T21:00:00"))).toBe(
+      utc("2026-04-25T20:00:00"),
+    );
+  });
+});
+
+describe("isMarketHoursOpen — Phase D mode-aware gate", () => {
+  it("'always' is open at any moment", () => {
+    expect(isMarketHoursOpen("always", utc("2026-04-25T03:00:00")).open).toBe(
+      true,
+    );
+    expect(isMarketHoursOpen(undefined, utc("2026-04-25T03:00:00")).open).toBe(
+      true,
+    );
+  });
+
+  describe("'fx-24x5' — Sun 22:00 UTC → Fri 22:00 UTC", () => {
+    it("closed all Saturday", () => {
+      // 2026-04-25 = Sat
+      const r = isMarketHoursOpen("fx-24x5", utc("2026-04-25T12:00:00"));
+      expect(r.open).toBe(false);
+      if (!r.open) expect(r.reason).toMatch(/Saturday/);
+    });
+    it("closed Sunday before 22:00 UTC", () => {
+      // 2026-04-26 = Sun
+      expect(isMarketHoursOpen("fx-24x5", utc("2026-04-26T20:00:00")).open).toBe(
+        false,
+      );
+    });
+    it("opens Sunday at 22:00 UTC", () => {
+      expect(isMarketHoursOpen("fx-24x5", utc("2026-04-26T22:00:00")).open).toBe(
+        true,
+      );
+    });
+    it("closes Friday at 22:00 UTC", () => {
+      // 2026-05-01 = Fri
+      expect(isMarketHoursOpen("fx-24x5", utc("2026-05-01T21:59:00")).open).toBe(
+        true,
+      );
+      expect(isMarketHoursOpen("fx-24x5", utc("2026-05-01T22:00:00")).open).toBe(
+        false,
+      );
+    });
+  });
+
+  describe("'rth-only' — NYSE 09:30–16:00 ET, Mon–Fri", () => {
+    it("closed weekend", () => {
+      // Sat 2026-04-25 14:30 UTC = 10:30 ET — should be CLOSED (weekend)
+      expect(isMarketHoursOpen("rth-only", utc("2026-04-25T14:30:00")).open).toBe(
+        false,
+      );
+    });
+    it("open weekday during RTH (EDT)", () => {
+      // Mon 2026-04-27 14:30 UTC = 10:30 ET (within 09:30–16:00 EDT)
+      expect(isMarketHoursOpen("rth-only", utc("2026-04-27T14:30:00")).open).toBe(
+        true,
+      );
+    });
+    it("closed pre-open (before 09:30 ET)", () => {
+      // Mon 2026-04-27 13:00 UTC = 09:00 ET → pre-open
+      const r = isMarketHoursOpen("rth-only", utc("2026-04-27T13:00:00"));
+      expect(r.open).toBe(false);
+      if (!r.open) expect(r.reason).toMatch(/pre-open/);
+    });
+    it("closed post-close (after 16:00 ET)", () => {
+      // Mon 2026-04-27 21:00 UTC = 17:00 ET → post-close
+      const r = isMarketHoursOpen("rth-only", utc("2026-04-27T21:00:00"));
+      expect(r.open).toBe(false);
+      if (!r.open) expect(r.reason).toMatch(/post-close/);
+    });
+  });
+});
+
+describe("isMarketOpen consults strategy.marketHours for dynamic-strike groups", () => {
+  it("SOL 15min strike-up (always) is open 24/7", () => {
+    const sol = MARKET_GROUPS["sol-15m-strike-up"];
+    expect(sol).toBeDefined();
+    // Sat 14:00 UTC — SOL is crypto-always so still open.
+    expect(isMarketOpen(sol!, utc("2026-04-25T14:00:00"))).toBe(true);
+  });
+
+  it("XAU 1h-up (fx-24x5) is closed Saturday", () => {
+    const xauHr = MARKET_GROUPS["xau-1h-up"];
+    expect(xauHr).toBeDefined();
+    expect(isMarketOpen(xauHr!, utc("2026-04-25T14:00:00"))).toBe(false);
+  });
+
+  it("QQQ 1d (rth-only) is closed pre-open Mon", () => {
+    const qqq = MARKET_GROUPS["qqq-1d-up"];
+    expect(qqq).toBeDefined();
+    // Mon 2026-04-27 13:00 UTC = 09:00 ET → pre-open → closed
+    expect(isMarketOpen(qqq!, utc("2026-04-27T13:00:00"))).toBe(false);
+    // Mon 14:30 UTC = 10:30 ET → open
+    expect(isMarketOpen(qqq!, utc("2026-04-27T14:30:00"))).toBe(true);
   });
 });
