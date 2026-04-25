@@ -13,6 +13,7 @@ import {
   buildSpawnRecurring3minTxn,
   fetchMarketCreatedEventsForTxn,
   fetchPythPrice,
+  getActiveCaseIdForGroup,
   getPythVAA,
   moduleAddress,
   pythHermesUrl,
@@ -20,6 +21,7 @@ import {
   submitAdminTxnsParallel,
   type InputTransactionData,
 } from "@/lib/aptos";
+import { invalidateCache } from "@/lib/aptos-cache";
 import {
   activeGroupsByCadence,
   deriveMarketParams,
@@ -41,6 +43,7 @@ import {
 import { computeBarrierStrike } from "@/lib/quant/barrier-strike";
 import { isMacroBlackout } from "@/lib/quant/macro-calendar";
 import { computeRealizedVol7d } from "@/lib/quant/vol-estimator";
+import { isCloseMoment } from "@/lib/cron-gate";
 
 /**
  * Parse a Pyth Hermes VAA and extract the current price (signed i64 scaled
@@ -315,6 +318,16 @@ export async function GET(req: Request): Promise<Response> {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
+  // Close-moment gate: skip early on minutes where no cadence hits its close.
+  // ~80% of cron ticks return here without touching Aptos RPC.
+  const gate = isCloseMoment();
+  if (!gate.isCloseMoment) {
+    return NextResponse.json({
+      skipped: "not a close moment",
+      minute: gate.minuteOfHour,
+    });
+  }
+
   // Registry-driven: every active `on-resolve` Pyth group spawns here.
   // Adding a new pair (e.g. sol-3m) only requires editing market-groups.ts.
   const groups = activeGroupsByCadence("on-resolve")
@@ -350,20 +363,11 @@ export async function GET(req: Request): Promise<Response> {
             reason: `market closed (${group.category})`,
           };
         }
-        const groupBytes = Array.from(new TextEncoder().encode(group.groupId));
-        const active = (await aptos.view({
-          payload: {
-            function: `${moduleAddress()}::market_factory::get_active_market_in_group`,
-            typeArguments: [],
-            functionArguments: [groupBytes],
-          },
-        })) as [{ vec?: unknown[] }];
-        const vec = active[0]?.vec;
-        if (Array.isArray(vec) && vec.length > 0) {
+        const activeCaseId = await getActiveCaseIdForGroup(group.groupId);
+        if (activeCaseId !== null) {
           let nextCloseTime: number | undefined;
           try {
-            const caseId = BigInt(vec[0] as string);
-            const state = await readCaseState(caseId);
+            const state = await readCaseState(activeCaseId);
             nextCloseTime = Number(state.closeTime);
           } catch {
             /* best-effort */
@@ -537,6 +541,11 @@ export async function GET(req: Request): Promise<Response> {
         });
         return;
       }
+
+      // Spawn succeeded → group's active case id changed. Invalidate the
+      // cache entry so next reader picks up the new case instead of the
+      // stale "no active" result.
+      invalidateCache(`activeMarket:${p.groupId}`);
 
       let caseId: string | null = null;
       let dbWritten = false;

@@ -28,6 +28,7 @@ import {
   buildResolveOracleTxn,
   fetchPythPrice,
   fetchResolvedEventForTxn,
+  getActiveCaseIdForGroup,
   getPythVAA,
   moduleAddress,
   readCaseState,
@@ -35,6 +36,7 @@ import {
   type InputTransactionData,
   type OutcomeCode,
 } from "@/lib/aptos";
+import { invalidateCache } from "@/lib/aptos-cache";
 import {
   pythFeedForGroup,
   resolvableGroupsByCadence,
@@ -44,6 +46,7 @@ import {
   settlementDisplayPrices,
   type OutcomeLabel,
 } from "@/lib/market-settlement";
+import { isCloseMoment } from "@/lib/cron-gate";
 
 // Matches Move `case_vault.move`: STATE_RESOLVED = 2, STATE_INVALID = 3.
 const STATE_RESOLVED = 2;
@@ -155,6 +158,16 @@ export async function GET(req: Request): Promise<Response> {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
+  // Close-moment gate: same logic as spawn-recurring. Resolution can only
+  // fire after a round closes, which only happens on cadence-aligned minutes.
+  const gate = isCloseMoment();
+  if (!gate.isCloseMoment) {
+    return NextResponse.json({
+      skipped: "not a close moment",
+      minute: gate.minuteOfHour,
+    });
+  }
+
   const mode = getResolveMode();
   // resolvableGroupsByCadence includes legacy-cleanup groups so lingering
   // cases (e.g. old xau-daily after the 1g up/down pivot) still get resolved
@@ -170,19 +183,10 @@ export async function GET(req: Request): Promise<Response> {
   const preps: GroupPrep[] = await Promise.all(
     groups.map(async (group): Promise<GroupPrep> => {
       try {
-        const groupBytes = Array.from(new TextEncoder().encode(group.groupId));
-        const active = (await aptos.view({
-          payload: {
-            function: `${moduleAddress()}::market_factory::get_active_market_in_group`,
-            typeArguments: [],
-            functionArguments: [groupBytes],
-          },
-        })) as [{ vec?: unknown[] }];
-        const vec = active[0]?.vec;
-        if (!Array.isArray(vec) || vec.length === 0) {
+        const caseId = await getActiveCaseIdForGroup(group.groupId);
+        if (caseId === null) {
           return { groupId: group.groupId, kind: "skip", reason: "no active case" };
         }
-        const caseId = BigInt(vec[0] as string);
         const state = await readCaseState(caseId);
 
         if (state.state === STATE_RESOLVED || state.state === STATE_INVALID) {
@@ -301,6 +305,12 @@ export async function GET(req: Request): Promise<Response> {
         });
         continue;
       }
+
+      // Resolve succeeded → both the case state and the group's active slot
+      // changed on chain. Drop both cache keys so the next cron tick or list
+      // request reads fresh.
+      invalidateCache(`caseState:${meta.caseId}`);
+      invalidateCache(`activeMarket:${meta.groupId}`);
 
       const clearMeta = payloadMeta[i + 1];
       const clearResult = results[i + 1];

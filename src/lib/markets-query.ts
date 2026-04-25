@@ -15,6 +15,7 @@ import { db } from "@/db";
 import { casesV3, markets, seriesV3 } from "@/db/schema";
 import {
   aptos,
+  getActiveCaseIdForGroup,
   moduleAddress,
   readCaseState,
   type MarketCreatedEvent,
@@ -306,22 +307,12 @@ async function ensureActiveRecurringMarkets(): Promise<void> {
             ),
           );
 
-        const groupBytes = Array.from(new TextEncoder().encode(spec.groupId));
-        const view = (await aptos.view({
-          payload: {
-            function: `${moduleAddress()}::market_factory::get_active_market_in_group`,
-            typeArguments: [],
-            functionArguments: [groupBytes],
-          },
-        })) as [{ vec?: unknown[] }];
-        const vec = view[0]?.vec;
-        if (!Array.isArray(vec) || vec.length === 0) {
+        const caseId = await getActiveCaseIdForGroup(spec.groupId);
+        if (caseId === null) {
           // No active on-chain case → spawn cron will create one. Do not
           // insert a caseId=null placeholder.
           return;
         }
-
-        const caseId = BigInt(vec[0] as string);
         const state = await readCaseState(caseId);
 
         // Skip if the chain already resolved/drained — no need to resurrect.

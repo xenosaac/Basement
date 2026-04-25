@@ -5,20 +5,15 @@ import { useSeriesV3 } from "@/hooks/use-series-v3";
 import { SeriesCardV2 } from "@/components/series-card-v2";
 import type { SeriesCategory, SeriesSummary } from "@/lib/types/v3-api";
 
-type TabValue = "all" | "all_crypto" | "macro" | "commodity" | "stocks" | "others";
+type TabValue = "all" | "all_crypto" | "commodity" | "stocks" | "others";
 
 const CATEGORIES: { label: string; value: TabValue }[] = [
   { label: "All", value: "all" },
   { label: "All Crypto", value: "all_crypto" },
-  { label: "Macro", value: "macro" },
   { label: "Commodity", value: "commodity" },
   { label: "Stocks", value: "stocks" },
   { label: "Others", value: "others" },
 ];
-
-// Macro: ECO series (kind='event_driven') live in the registry but the list
-// endpoint doesn't surface them yet — show a placeholder until that wires up.
-const COMING_SOON_TABS: ReadonlySet<TabValue> = new Set<TabValue>(["macro"]);
 
 const QUICK_PLAY_IDS = new Set(["btc-usdc-3m", "eth-usdc-3m"]);
 
@@ -47,7 +42,6 @@ export function SeriesGrid() {
     const byTab: Record<TabValue, SeriesSummary[]> = {
       all,
       all_crypto: all.filter((s) => CRYPTO_CATEGORIES.includes(s.category)),
-      macro: [], // ECO series not yet exposed by /api/series; placeholder UI
       commodity: all.filter((s) => COMMODITY_CATEGORIES.includes(s.category)),
       stocks: all.filter((s) => STOCKS_CATEGORIES.includes(s.category)),
       others: all.filter((s) => !KNOWN_CATEGORIES.includes(s.category)),
@@ -122,24 +116,11 @@ export function SeriesGrid() {
       </div>
 
       {filtered.length === 0 ? (
-        COMING_SOON_TABS.has(activeTab) ? (
-          <div className="text-center py-16 text-white/30">
-            <p className="text-xs uppercase tracking-[3px]">
-              {activeTab === "macro" ? "Macro events coming soon" : "Coming soon"}
-            </p>
-            {activeTab === "macro" && (
-              <p className="text-xs text-white/25 mt-3">
-                CPI · Core PCE · Unemployment · GDP
-              </p>
-            )}
-          </div>
-        ) : (
-          <div className="text-center py-16 text-white/30">
-            <p className="text-xs uppercase tracking-[3px]">
-              No markets in this category
-            </p>
-          </div>
-        )
+        <div className="text-center py-16 text-white/30">
+          <p className="text-xs uppercase tracking-[3px]">
+            No markets in this category
+          </p>
+        </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           {filtered.map((s) => (

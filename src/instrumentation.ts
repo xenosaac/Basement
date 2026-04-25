@@ -33,6 +33,15 @@ interface SpawnResp {
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
   if (process.env.NEXT_PHASE === "phase-production-build") return;
+  // Opt-out for local dev: skip the auto-refresh tick chain entirely.
+  // Production Vercel never sees this code path (instrumentation runs once
+  // per server boot; Vercel cron is the source of truth there).
+  if (process.env.DISABLE_DEV_CRON === "1") {
+    console.log(
+      "[cron] dev auto-refresh disabled via DISABLE_DEV_CRON=1 — Vercel cron still runs in production",
+    );
+    return;
+  }
   if (cronRegistered) return;
   cronRegistered = true;
 

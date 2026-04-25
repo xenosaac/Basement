@@ -39,6 +39,8 @@ import {
   type MoveResource,
 } from "@aptos-labs/ts-sdk";
 
+import { cachedView } from "@/lib/aptos-cache";
+
 /* ---------------------------------------------------------------------------
  * T4-01 — Client singleton + factory
  * ------------------------------------------------------------------------ */
@@ -511,10 +513,28 @@ export function parseCaseVaultResource(
 }
 
 /** Read case state from chain. `CaseVault` + `MarketConfig` live at the
- *  same object address; parse merges both so callers get a single shape. */
+ *  same object address; parse merges both so callers get a single shape.
+ *
+ *  Cached 60s under `caseState:${caseId}` to avoid the 2-RPC fanout
+ *  (1 view + 1 getAccountResources) being repeated within a single cron
+ *  tick across spawn-recurring / resolve-onchain / markets-query that
+ *  read the same case. Invalidate on trade/settle (see `/api/bet`,
+ *  `/api/sell`, `/api/cron/tick::resolveCase`).
+ */
 export async function readCaseState(
   caseId: CaseId,
   client: Aptos = aptos,
+): Promise<CaseState> {
+  return cachedView(
+    `caseState:${caseId}`,
+    60_000,
+    () => readCaseStateUncached(caseId, client),
+  );
+}
+
+async function readCaseStateUncached(
+  caseId: CaseId,
+  client: Aptos,
 ): Promise<CaseState> {
   const [vaultAddress] = await client.view<[string]>({
     payload: {
@@ -523,18 +543,26 @@ export async function readCaseState(
       functionArguments: [caseId.toString()],
     } satisfies InputViewFunctionData,
   });
-  const [vaultRes, configRes] = await Promise.all([
-    client.getAccountResource({
-      accountAddress: vaultAddress,
-      resourceType:
-        `${moduleAddress()}::case_vault::CaseVault` as `${string}::${string}::${string}`,
-    }),
-    client.getAccountResource({
-      accountAddress: vaultAddress,
-      resourceType:
-        `${moduleAddress()}::case_vault::MarketConfig` as `${string}::${string}::${string}`,
-    }),
-  ]);
+  // Single getAccountResources call (1 RPC) to fetch all resources on the
+  // vault address, then locate CaseVault + MarketConfig client-side. Saves
+  // 1 RPC vs. two parallel getAccountResource calls and is the only batch
+  // pattern the Aptos REST API exposes.
+  const vaultCaseType =
+    `${moduleAddress()}::case_vault::CaseVault` as const;
+  const vaultConfigType =
+    `${moduleAddress()}::case_vault::MarketConfig` as const;
+  const all = await client.getAccountResources({
+    accountAddress: vaultAddress,
+  });
+  const vaultRes = all.find((r) => r.type === vaultCaseType);
+  const configRes = all.find((r) => r.type === vaultConfigType);
+  if (!vaultRes || !configRes) {
+    throw new Error(
+      `[readCaseState] vault ${vaultAddress} missing required resources: ${
+        !vaultRes ? "CaseVault " : ""
+      }${!configRes ? "MarketConfig" : ""}`.trim(),
+    );
+  }
   const vaultData =
     (vaultRes as { data?: Record<string, unknown> }).data ??
     (vaultRes as Record<string, unknown>);
@@ -545,6 +573,41 @@ export async function readCaseState(
     ...configData,
     ...vaultData,
   });
+}
+
+/**
+ * Read the active case id for a market group, or null if no active case.
+ * Cached 60s under `activeMarket:${groupId}` so the same per-tick read
+ * across spawn-recurring / resolve-onchain / markets-query / use-active-case
+ * shares one RPC. Invalidated on spawn / resolve / clear (call sites in
+ * the cron routes after successful tx).
+ */
+export async function getActiveCaseIdForGroup(
+  groupId: string,
+  client: Aptos = aptos,
+): Promise<bigint | null> {
+  return cachedView(
+    `activeMarket:${groupId}`,
+    60_000,
+    () => getActiveCaseIdUncached(groupId, client),
+  );
+}
+
+async function getActiveCaseIdUncached(
+  groupId: string,
+  client: Aptos,
+): Promise<bigint | null> {
+  const groupBytes = Array.from(new TextEncoder().encode(groupId));
+  const [opt] = (await client.view({
+    payload: {
+      function: entryFn("market_factory", "get_active_market_in_group"),
+      typeArguments: [],
+      functionArguments: [groupBytes],
+    } satisfies InputViewFunctionData,
+  })) as [{ vec?: unknown[] }];
+  const vec = opt?.vec;
+  if (!Array.isArray(vec) || vec.length === 0) return null;
+  return BigInt(vec[0] as string);
 }
 
 /* ---------------------------------------------------------------------------

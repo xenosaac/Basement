@@ -16,8 +16,12 @@ const ENV_KEYS = [
 ] as const;
 const saved: Record<string, string | undefined> = {};
 
-beforeEach(() => {
+beforeEach(async () => {
   for (const k of ENV_KEYS) saved[k] = process.env[k];
+  // readCaseState now wraps a module-global TTL cache; clear between tests so
+  // a fakeClient mock from one test doesn't leak its return shape to another.
+  const cacheMod = await import("../aptos-cache");
+  cacheMod._clearCacheForTests();
 });
 
 afterEach(() => {
@@ -315,27 +319,37 @@ describe("admin builders — payload shape (no private key reads)", () => {
 describe("simulate helper — result shape", () => {
   it("simulateBuyYes returns {expectedSharesOut, priceImpactBps, gasEstimate}", async () => {
     setEnvHappy();
+    // Cache is module-global; clear so prior tests don't leak readCaseState
+    // results into this one (the simulate fakeClient differs between tests).
+    const cacheMod = await import("../aptos-cache");
+    cacheMod._clearCacheForTests();
     const mod = await import("../aptos");
-    // Stub the Aptos client methods we need.
+    const caseVaultData = {
+      yes_reserve: "1000",
+      no_reserve: "1000",
+      state: 1,
+      resolved_outcome: 0,
+      admin_addr: "0xadm1",
+      close_time: "0",
+      fee_bps: 30,
+      strike_price: "0",
+      market_type: 0,
+      threshold_type: 0,
+      max_trade_bps: 0,
+      max_staleness_sec: 0,
+      asset_pyth_feed_id: "0x00",
+    };
     const fakeClient = {
       view: vi.fn().mockResolvedValue(["0xvault"]),
+      // readCaseState now uses the plural getAccountResources to fetch both
+      // CaseVault + MarketConfig in a single RPC. Provide both shapes.
+      getAccountResources: vi.fn().mockResolvedValue([
+        { type: `${process.env.BASEMENT_MODULE_ADDRESS}::case_vault::CaseVault`, data: caseVaultData },
+        { type: `${process.env.BASEMENT_MODULE_ADDRESS}::case_vault::MarketConfig`, data: caseVaultData },
+      ]),
       getAccountResource: vi.fn().mockResolvedValue({
         type: "0xabc1::case_vault::CaseVault",
-        data: {
-          yes_reserve: "1000",
-          no_reserve: "1000",
-          state: 1,
-          resolved_outcome: 0,
-          admin_addr: "0xadm1",
-          close_time: "0",
-          fee_bps: 30,
-          strike_price: "0",
-          market_type: 0,
-          threshold_type: 0,
-          max_trade_bps: 0,
-          max_staleness_sec: 0,
-          asset_pyth_feed_id: "0x00",
-        },
+        data: caseVaultData,
       }),
       transaction: {
         build: { simple: vi.fn().mockResolvedValue({ rawTxn: true }) },
@@ -367,25 +381,32 @@ describe("simulateBuy — Move-aligned CPMM math (fee + reserve direction)", () 
     noReserve: string;
     feeBps: number;
   }) {
+    const caseVaultData = {
+      yes_reserve: opts.yesReserve,
+      no_reserve: opts.noReserve,
+      state: 1,
+      resolved_outcome: 0,
+      admin_addr: "0xadm1",
+      close_time: "0",
+      fee_bps: opts.feeBps,
+      strike_price: "0",
+      market_type: 0,
+      threshold_type: 0,
+      max_trade_bps: 0,
+      max_staleness_sec: 0,
+      asset_pyth_feed_id: "0x00",
+    };
     return {
       view: vi.fn().mockResolvedValue(["0xvault"]),
+      // readCaseState now uses the plural getAccountResources for one-shot
+      // fetch of CaseVault + MarketConfig.
+      getAccountResources: vi.fn().mockResolvedValue([
+        { type: `${process.env.BASEMENT_MODULE_ADDRESS}::case_vault::CaseVault`, data: caseVaultData },
+        { type: `${process.env.BASEMENT_MODULE_ADDRESS}::case_vault::MarketConfig`, data: caseVaultData },
+      ]),
       getAccountResource: vi.fn().mockResolvedValue({
         type: "0xabc1::case_vault::CaseVault",
-        data: {
-          yes_reserve: opts.yesReserve,
-          no_reserve: opts.noReserve,
-          state: 1,
-          resolved_outcome: 0,
-          admin_addr: "0xadm1",
-          close_time: "0",
-          fee_bps: opts.feeBps,
-          strike_price: "0",
-          market_type: 0,
-          threshold_type: 0,
-          max_trade_bps: 0,
-          max_staleness_sec: 0,
-          asset_pyth_feed_id: "0x00",
-        },
+        data: caseVaultData,
       }),
       transaction: {
         build: { simple: vi.fn().mockResolvedValue({ rawTxn: true }) },
