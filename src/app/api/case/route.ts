@@ -3,7 +3,7 @@ import { and, eq, gt } from "drizzle-orm";
 import { db } from "@/db";
 import { casesV3, ordersV3, positionsV3 } from "@/db/schema";
 import { getSeries } from "@/lib/series-config";
-import { curvePrices } from "@/lib/v3-pricing";
+import { curvePrices } from "@/lib/quant";
 import type { ApiErrorResponse } from "@/lib/types/v3-api";
 
 export const dynamic = "force-dynamic";

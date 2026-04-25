@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { casesV3 } from "@/db/schema";
-import { curvePrices, quoteBuy, quoteSell } from "@/lib/v3-pricing";
+import { curvePrices, quoteBuy, quoteSell } from "@/lib/quant";
 import type { ApiErrorResponse, QuoteResponse } from "@/lib/types/v3-api";
 
 export const dynamic = "force-dynamic";

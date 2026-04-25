@@ -21,7 +21,7 @@ import {
   priceNo as pmPriceNo,
   initialReserves,
   isUninitialized,
-} from "@/lib/pm-amm";
+} from "./pm-amm";
 
 // ───────────────────── Constants ─────────────────────
 

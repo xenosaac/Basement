@@ -11,7 +11,7 @@ import {
   isMarketOpen,
 } from "@/lib/series-config";
 import { getCachedPrice, pythE8ToCents } from "@/lib/pyth-hermes";
-import { quoteBuy } from "@/lib/v3-pricing";
+import { quoteBuy } from "@/lib/quant";
 import type { ApiErrorResponse, BetResponse } from "@/lib/types/v3-api";
 
 export const dynamic = "force-dynamic";

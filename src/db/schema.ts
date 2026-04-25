@@ -242,9 +242,28 @@ export const seriesV3 = pgTable(
     feeBps: integer("fee_bps").notNull().default(200), // 2%
     sortOrder: integer("sort_order").notNull().default(0),
     isActive: smallint("is_active").notNull().default(1),
+    // ─── v0.5 product expansion (Phase A, 2026-04-24) ─────────────
+    // Cross-references MARKET_GROUPS[].groupId (no FK; legacy rows stay NULL).
+    groupId: text("group_id"),
+    // Round duration hint in seconds (15min=900, 1h=3600, 1d=86400). Allows
+    // multiple cadences alongside cadenceSec which is the cron poll interval.
+    durationSecHint: integer("duration_sec_hint"),
+    // Strike semantics: 'absolute_above' | 'absolute_below' | 'barrier_two_sided'.
+    // NULL on legacy rolling 3m series; readers default to absolute_above.
+    strikeKind: text("strike_kind"),
+    // Series kind: 'rolling' (default, current behaviour) | 'event_driven' (ECO).
+    kind: text("kind").notNull().default("rolling"),
+    // ECO event type: 'us_cpi_mom' | 'us_core_pce' | 'us_unemployment' | 'us_gdp_qoq'.
+    eventType: text("event_type"),
+    // pm-AMM L override per series. NULL → use PM_AMM_L_DOLLARS env. ECO uses 300.
+    pmAmmLDollars: integer("pm_amm_l_dollars"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("series_v3_category_idx").on(t.category)],
+  (t) => [
+    index("series_v3_category_idx").on(t.category),
+    index("series_v3_kind_idx").on(t.kind),
+    index("series_v3_group_idx").on(t.groupId),
+  ],
 );
 
 export const casesV3 = pgTable(
@@ -272,6 +291,21 @@ export const casesV3 = pgTable(
     upSharesE8: bigint("up_shares_e8", { mode: "bigint" }).notNull().default(sql`0`),
     downSharesE8: bigint("down_shares_e8", { mode: "bigint" }).notNull().default(sql`0`),
     state: caseStateEnumV3("state").notNull().default("OPEN"),
+    // ─── v0.5 product expansion (Phase A, 2026-04-24) ─────────────
+    // Snapshot of seriesV3.strikeKind at spawn time (audit; series may evolve).
+    strikeKindCaptured: text("strike_kind_captured"),
+    // Barrier two-sided strikes (price_e8 units, matching strikePriceE8).
+    // For 'barrier_two_sided' cases: low = P0×(1-X), high = P0×(1+X).
+    barrierLowPriceE8: bigint("barrier_low_price_e8", { mode: "bigint" }),
+    barrierHighPriceE8: bigint("barrier_high_price_e8", { mode: "bigint" }),
+    // Volatility source audit ('samples'|'fallback') and freshness flag at spawn.
+    volSourceTag: text("vol_source_tag"),
+    volIsFresh: smallint("vol_is_fresh"), // 0/1 boolean
+    // ECO event-driven case fields (Phase G).
+    releaseTimeSec: bigint("release_time_sec", { mode: "number" }),
+    freezeAtSec: bigint("freeze_at_sec", { mode: "number" }),
+    actualReleasedPriceE8: bigint("actual_released_price_e8", { mode: "bigint" }),
+    voidReason: text("void_reason"), // 'no_publish'|'low_confidence'|'pre_release_tick'
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
   },
@@ -279,6 +313,27 @@ export const casesV3 = pgTable(
     primaryKey({ columns: [t.seriesId, t.roundIdx] }),
     index("cases_v3_state_close_idx").on(t.state, t.closeTimeSec),
     index("cases_v3_series_round_desc_idx").on(t.seriesId, t.roundIdx),
+    index("cases_v3_release_time_idx").on(t.releaseTimeSec),
+  ],
+);
+
+// ─── ECO event calendar (Phase G, 2026-04-24) ────────────────────
+// Hardcoded BLS/BEA release schedule. eco-spawn cron reads to spawn ECO cases.
+// Status: 'scheduled' (waiting) → 'spawned' (case created) → 'released' (settled) | 'void'.
+export const ecoEventCalendar = pgTable(
+  "eco_event_calendar",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    eventType: text("event_type").notNull(),
+    releaseTimeSec: bigint("release_time_sec", { mode: "number" }).notNull(),
+    status: text("status").notNull().default("scheduled"),
+    spawnedSeriesId: text("spawned_series_id"),
+    spawnedRoundIdx: bigint("spawned_round_idx", { mode: "number" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("eco_event_calendar_event_time_uniq").on(t.eventType, t.releaseTimeSec),
+    index("eco_event_calendar_status_time_idx").on(t.status, t.releaseTimeSec),
   ],
 );
 
@@ -400,3 +455,5 @@ export type FaucetClaim = typeof faucetClaimsV3.$inferSelect;
 export type NewFaucetClaim = typeof faucetClaimsV3.$inferInsert;
 export type PriceTick = typeof priceTicksV3.$inferSelect;
 export type NewPriceTick = typeof priceTicksV3.$inferInsert;
+export type EcoEventCalendarRow = typeof ecoEventCalendar.$inferSelect;
+export type NewEcoEventCalendarRow = typeof ecoEventCalendar.$inferInsert;

@@ -16,7 +16,7 @@ import { useFaucetV3 } from "@/hooks/use-faucet-v3";
 import { useAptosAuth } from "@/components/aptos-auth-provider";
 import { useConnectModal } from "@/components/connect-modal-provider";
 import { useToastQueue } from "@/components/toast-queue-provider";
-import { formatCentsShare } from "@/lib/v3-pricing";
+import { formatCentsShare } from "@/lib/quant";
 import { sideLabel } from "@/lib/utils";
 
 /**

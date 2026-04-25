@@ -7,7 +7,7 @@ import {
   formatUsdFromCents,
   impliedProbability,
   isSeriesResolving,
-} from "@/lib/v3-pricing";
+} from "@/lib/quant";
 import { renderSeriesQuestion } from "@/lib/utils";
 import type { SeriesSummary } from "@/lib/types/v3-api";
 

@@ -4,7 +4,7 @@ import { db } from "@/db";
 import { casesV3, ordersV3, positionsV3, userBalancesV3 } from "@/db/schema";
 import { getVerifiedAddress } from "@/lib/auth";
 import { getSeries } from "@/lib/series-config";
-import { quoteSell, sharesE8ToCents } from "@/lib/v3-pricing";
+import { quoteSell, sharesE8ToCents } from "@/lib/quant";
 import type { ApiErrorResponse, SellResponse } from "@/lib/types/v3-api";
 
 export const dynamic = "force-dynamic";

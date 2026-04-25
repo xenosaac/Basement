@@ -29,7 +29,7 @@
  * delta is small; static pm-AMM is sufficient for v0.
  */
 
-import { PM_AMM_L_DOLLARS } from "./constants";
+import { PM_AMM_L_DOLLARS } from "@/lib/constants";
 
 export const DEFAULT_L = PM_AMM_L_DOLLARS;
 

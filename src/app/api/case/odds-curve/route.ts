@@ -8,7 +8,7 @@ import {
   initialReserves,
   Phi,
   zOf,
-} from "@/lib/pm-amm";
+} from "@/lib/quant";
 import type { ApiErrorResponse } from "@/lib/types/v3-api";
 
 export const dynamic = "force-dynamic";

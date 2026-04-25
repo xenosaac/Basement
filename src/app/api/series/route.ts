@@ -10,7 +10,7 @@ import {
   isMarketOpen,
 } from "@/lib/series-config";
 import { getCachedPrice, pythE8ToCents } from "@/lib/pyth-hermes";
-import { curvePrices } from "@/lib/v3-pricing";
+import { curvePrices } from "@/lib/quant";
 import type { SeriesListResponse, SeriesSummary } from "@/lib/types/v3-api";
 
 export const dynamic = "force-dynamic";
