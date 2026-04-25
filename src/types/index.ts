@@ -17,6 +17,12 @@ export interface MarketWithPrices {
   strikePrice?: number | null;
   recurringGroupId?: string | null;
   caseId?: string | null;
+  /** Lower barrier (Pyth e8 raw) for `barrier_two_sided` cases — joined from
+   *  cases_v3. NULL on directional / legacy markets. Stringified bigint to
+   *  avoid Number precision loss. */
+  barrierLowPriceE8?: string | null;
+  /** Upper barrier (Pyth e8 raw) for `barrier_two_sided` cases. */
+  barrierHighPriceE8?: string | null;
 }
 
 export interface MarketsResponse {

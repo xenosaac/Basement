@@ -7,25 +7,34 @@ import {
   isActiveRecurringGroupId,
   categoryForRecurringGroupId,
   sortNameForRecurringGroupId,
-  type Category,
 } from "@/lib/market-groups";
+import { categoryFromPrefix, type Category } from "@/lib/case-copy";
 import type { MarketsResponse, MarketWithPrices } from "@/types";
 
 type TabValue = Category | "all";
 
+// Order: All / Crypto / Macro / Commodity / Stocks / Others. Macro is wedged
+// between Crypto and Commodity so the tab strip reads from highest-volume
+// (crypto) → editorial (macro) → traditional (commodity, stocks) → catch-all.
 const CATEGORIES: { label: string; value: TabValue }[] = [
   { label: "All", value: "all" },
   { label: "Crypto", value: "crypto" },
-  { label: "Stocks", value: "stocks" },
+  { label: "Macro", value: "macro" },
   { label: "Commodity", value: "commodity" },
+  { label: "Stocks", value: "stocks" },
   { label: "Others", value: "others" },
 ];
 
 // Tabs that currently have no live markets. Shown with a minimal "Coming Soon"
 // placeholder instead of the generic "No markets" empty state.
+//
+// Macro: ECO series live in cases_v3 (kind='event_driven'), not in the markets
+// table that this grid pulls from. v0 ships the tab placeholder; v1 will merge
+// ECO cases into the list endpoint and remove "macro" from this set.
 const COMING_SOON_TABS: ReadonlySet<TabValue> = new Set<TabValue>([
   "stocks",
   "others",
+  "macro",
 ]);
 
 // Quick Play strip is reserved for the BTC/ETH 3-min flagship rounds. Every
@@ -67,6 +76,7 @@ export function MarketGrid({ initialData }: { initialData?: MarketsResponse }) {
     const byCategory: Record<TabValue, MarketWithPrices[]> = {
       all: [],
       crypto: [],
+      macro: [],
       stocks: [],
       commodity: [],
       others: [],
@@ -103,7 +113,15 @@ export function MarketGrid({ initialData }: { initialData?: MarketsResponse }) {
       }
 
       byCategory.all.push(market);
-      const cat = categoryForRecurringGroupId(market.recurringGroupId);
+      // Registry first (authoritative for groups in MARKET_GROUPS), prefix
+      // fallback for new categories like "macro" (eco-*) that don't live in
+      // the registry, plus any Phase D group whose registry entry might lag
+      // a code deploy.
+      const registryCat = categoryForRecurringGroupId(market.recurringGroupId);
+      const cat: TabValue =
+        registryCat !== "others"
+          ? registryCat
+          : categoryFromPrefix(market.recurringGroupId);
       byCategory[cat].push(market);
     }
 
@@ -129,7 +147,10 @@ export function MarketGrid({ initialData }: { initialData?: MarketsResponse }) {
     return (
       <div className="space-y-3">
         {[...Array(5)].map((_, i) => (
-          <div key={i} className="glass rounded-lg px-6 py-5 h-[76px] animate-pulse" />
+          <div
+            key={i}
+            className="glass rounded-[22px] border border-white/[0.06] px-6 py-5 h-[88px] animate-pulse"
+          />
         ))}
       </div>
     );
@@ -152,7 +173,7 @@ export function MarketGrid({ initialData }: { initialData?: MarketsResponse }) {
             <h2 className="text-sm font-semibold text-white uppercase tracking-[2px]">Quick Play</h2>
             <span className="text-[10px] text-white/30 uppercase tracking-[2px]">3-min rounds</span>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {recurringMarkets.map((market) => (
               <div key={market.id} className="relative">
                 <MarketCard market={market} />
@@ -193,8 +214,15 @@ export function MarketGrid({ initialData }: { initialData?: MarketsResponse }) {
         COMING_SOON_TABS.has(activeTab) ? (
           <div className="text-center py-16">
             <p className="text-xs uppercase tracking-[3px] text-white/35">
-              Coming Soon
+              {activeTab === "macro"
+                ? "Macro events coming soon"
+                : "Coming Soon"}
             </p>
+            {activeTab === "macro" && (
+              <p className="text-xs text-white/25 mt-3">
+                CPI · Core PCE · Unemployment · GDP
+              </p>
+            )}
           </div>
         ) : (
           <div className="text-center py-16">
