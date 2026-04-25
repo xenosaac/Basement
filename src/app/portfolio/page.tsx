@@ -146,7 +146,7 @@ export default function PortfolioPage() {
               return (
                 <Link
                   key={`${p.seriesId}-${p.roundIdx}-${p.side}`}
-                  href={`/series/${p.seriesId}?side=${p.side}`}
+                  href={`/series/${p.seriesId}/round/${p.roundIdx}`}
                   className="glass rounded-lg px-5 py-3 flex items-center justify-between gap-4 hover:border-white/[0.18] border border-transparent transition"
                 >
                   <div>
