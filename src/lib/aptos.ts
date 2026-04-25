@@ -181,6 +181,92 @@ export function pythXauFeedId(): string {
   );
 }
 
+// v0.5 Phase C — additional Pyth feed getters for the new market groups.
+// Each follows the same `pickStatic` pattern: server-side env first, then
+// `NEXT_PUBLIC_*` mirror, throw if neither is set. Feed ids are the
+// hermes-beta channel ids (Aptos testnet) — see `.env.example` for the
+// mainnet alternates and channel-vs-feed-id discipline.
+export function pythSolFeedId(): string {
+  return pickStatic(
+    "PYTH_SOL_FEED_ID (or NEXT_PUBLIC_PYTH_SOL_FEED_ID)",
+    process.env.PYTH_SOL_FEED_ID,
+    process.env.NEXT_PUBLIC_PYTH_SOL_FEED_ID,
+  );
+}
+export function pythMaticFeedId(): string {
+  return pickStatic(
+    "PYTH_MATIC_FEED_ID (or NEXT_PUBLIC_PYTH_MATIC_FEED_ID)",
+    process.env.PYTH_MATIC_FEED_ID,
+    process.env.NEXT_PUBLIC_PYTH_MATIC_FEED_ID,
+  );
+}
+export function pythAptFeedId(): string {
+  return pickStatic(
+    "PYTH_APT_FEED_ID (or NEXT_PUBLIC_PYTH_APT_FEED_ID)",
+    process.env.PYTH_APT_FEED_ID,
+    process.env.NEXT_PUBLIC_PYTH_APT_FEED_ID,
+  );
+}
+export function pythXagFeedId(): string {
+  return pickStatic(
+    "PYTH_XAG_FEED_ID (or NEXT_PUBLIC_PYTH_XAG_FEED_ID)",
+    process.env.PYTH_XAG_FEED_ID,
+    process.env.NEXT_PUBLIC_PYTH_XAG_FEED_ID,
+  );
+}
+export function pythXptFeedId(): string {
+  return pickStatic(
+    "PYTH_XPT_FEED_ID (or NEXT_PUBLIC_PYTH_XPT_FEED_ID)",
+    process.env.PYTH_XPT_FEED_ID,
+    process.env.NEXT_PUBLIC_PYTH_XPT_FEED_ID,
+  );
+}
+export function pythHypeFeedId(): string {
+  return pickStatic(
+    "PYTH_HYPE_FEED_ID (or NEXT_PUBLIC_PYTH_HYPE_FEED_ID)",
+    process.env.PYTH_HYPE_FEED_ID,
+    process.env.NEXT_PUBLIC_PYTH_HYPE_FEED_ID,
+  );
+}
+/** Brent front-month override. Prefer the rollover table in
+ *  `src/lib/quant/brent-rollover.ts::resolveBrentFeedId`; this getter only
+ *  reads the env override and is a fallthrough when the table is empty. */
+export function pythBrentFrontMonthFeedId(): string {
+  return pickStatic(
+    "PYTH_BRENT_FRONT_MONTH_FEED_ID (or NEXT_PUBLIC_PYTH_BRENT_FRONT_MONTH_FEED_ID)",
+    process.env.PYTH_BRENT_FRONT_MONTH_FEED_ID,
+    process.env.NEXT_PUBLIC_PYTH_BRENT_FRONT_MONTH_FEED_ID,
+  );
+}
+export function pythQqqFeedId(): string {
+  return pickStatic(
+    "PYTH_QQQ_FEED_ID (or NEXT_PUBLIC_PYTH_QQQ_FEED_ID)",
+    process.env.PYTH_QQQ_FEED_ID,
+    process.env.NEXT_PUBLIC_PYTH_QQQ_FEED_ID,
+  );
+}
+export function pythEurUsdFeedId(): string {
+  return pickStatic(
+    "PYTH_EURUSD_FEED_ID (or NEXT_PUBLIC_PYTH_EURUSD_FEED_ID)",
+    process.env.PYTH_EURUSD_FEED_ID,
+    process.env.NEXT_PUBLIC_PYTH_EURUSD_FEED_ID,
+  );
+}
+export function pythUsdJpyFeedId(): string {
+  return pickStatic(
+    "PYTH_USDJPY_FEED_ID (or NEXT_PUBLIC_PYTH_USDJPY_FEED_ID)",
+    process.env.PYTH_USDJPY_FEED_ID,
+    process.env.NEXT_PUBLIC_PYTH_USDJPY_FEED_ID,
+  );
+}
+export function pythUsdCnhFeedId(): string {
+  return pickStatic(
+    "PYTH_USDCNH_FEED_ID (or NEXT_PUBLIC_PYTH_USDCNH_FEED_ID)",
+    process.env.PYTH_USDCNH_FEED_ID,
+    process.env.NEXT_PUBLIC_PYTH_USDCNH_FEED_ID,
+  );
+}
+
 /* ---------------------------------------------------------------------------
  * T4-03 — Types
  * ------------------------------------------------------------------------ */

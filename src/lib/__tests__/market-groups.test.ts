@@ -69,11 +69,16 @@ describe("isMarketOpen", () => {
 });
 
 describe("MARKET_GROUPS registry", () => {
-  it("BTC/ETH active, XAU up/down active, legacy xau-daily inactive", () => {
+  it("BTC/ETH active, all XAU groups inactive (v0.5 Phase C: legacyCleanupOnly)", () => {
     expect(MARKET_GROUPS["btc-3m"]?.active).toBe(true);
     expect(MARKET_GROUPS["eth-3m"]?.active).toBe(true);
-    expect(MARKET_GROUPS["xau-daily-up"]?.active).toBe(true);
-    expect(MARKET_GROUPS["xau-daily-down"]?.active).toBe(true);
+    // Phase C demoted xau-daily-up/down — superseded by xau-1h-up/down.
+    // Both keep `legacyCleanupOnly: true` so any open daily case still
+    // resolves; the cron + UI skip them otherwise.
+    expect(MARKET_GROUPS["xau-daily-up"]?.active).toBe(false);
+    expect(MARKET_GROUPS["xau-daily-up"]?.legacyCleanupOnly).toBe(true);
+    expect(MARKET_GROUPS["xau-daily-down"]?.active).toBe(false);
+    expect(MARKET_GROUPS["xau-daily-down"]?.legacyCleanupOnly).toBe(true);
     expect(MARKET_GROUPS["xau-daily"]?.active).toBe(false);
     expect(MARKET_GROUPS["xau-daily"]?.legacyCleanupOnly).toBe(true);
   });
