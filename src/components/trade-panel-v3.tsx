@@ -34,9 +34,20 @@ function formatCountdown(closeSec: number) {
 export function TradePanelV3({
   series,
   initialSide = "UP",
+  roundIdx: roundIdxProp,
+  caseState,
+  resolvedOutcome,
 }: {
   series: SeriesSummary;
   initialSide?: BetSide;
+  /** Defaults to series.currentRoundIdx (live entry from Markets page).
+   *  Pass explicitly when rendering a specific round (Portfolio link → /round/[roundIdx]). */
+  roundIdx?: number;
+  /** Defaults to "OPEN" (live current round). For historical/resolved rounds,
+   *  pass the actual case state so BUY is disabled and SELL works at the
+   *  fixed redemption price (handled server-side by /api/sell). */
+  caseState?: "OPEN" | "CLOSED" | "RESOLVED" | "VOID";
+  resolvedOutcome?: "UP" | "DOWN" | "INVALID" | null;
 }) {
   const { connected } = useWallet();
   const user = useUser();
@@ -47,7 +58,17 @@ export function TradePanelV3({
   const sell = useSellV3();
   const faucet = useFaucetV3();
 
-  const [direction, setDirection] = useState<"BUY" | "SELL">("BUY");
+  // Resolved props with backward-compatible defaults.
+  const roundIdx = roundIdxProp ?? series.currentRoundIdx;
+  const isCurrentRound = roundIdx === series.currentRoundIdx;
+  const state = caseState ?? "OPEN";
+  // BUY only makes sense on the live current round in OPEN state.
+  // Past rounds + RESOLVED/VOID/CLOSED → SELL-only.
+  const canBuy = isCurrentRound && state === "OPEN";
+
+  const [direction, setDirection] = useState<"BUY" | "SELL">(
+    canBuy ? "BUY" : "SELL",
+  );
   const [side, setSide] = useState<BetSide>(initialSide);
   const [amountCents, setAmountCents] = useState<number>(100);
   const [sellSharesE8, setSellSharesE8] = useState<bigint>(0n);
@@ -56,6 +77,11 @@ export function TradePanelV3({
     setSide(initialSide);
   }, [initialSide]);
 
+  // If buying isn't allowed, force the SELL tab.
+  useEffect(() => {
+    if (!canBuy && direction === "BUY") setDirection("SELL");
+  }, [canBuy, direction]);
+
   // Position for the currently selected side (sell mode source-of-truth)
   const myPosition = useMemo(() => {
     if (!positionsData) return null;
@@ -63,20 +89,22 @@ export function TradePanelV3({
       positionsData.positions.find(
         (p) =>
           p.seriesId === series.seriesId &&
-          p.roundIdx === series.currentRoundIdx &&
+          p.roundIdx === roundIdx &&
           p.side === side,
       ) ?? null
     );
-  }, [positionsData, series.seriesId, series.currentRoundIdx, side]);
+  }, [positionsData, series.seriesId, roundIdx, side]);
 
   const positionSharesE8 = myPosition ? BigInt(myPosition.sharesE8) : 0n;
 
-  // Quote — buy uses amountCents, sell uses sharesE8
+  // Quote — buy uses amountCents, sell uses sharesE8.
+  // /api/quote / /api/sell already handle RESOLVED case (fixed 100/0¢) and
+  // VOID (cost-basis refund); we just thread the right roundIdx through.
   const quote = useQuoteV3({
     seriesId: series.seriesId as SeriesId,
-    roundIdx: series.currentRoundIdx,
+    roundIdx,
     side,
-    amountCents: direction === "BUY" ? amountCents : undefined,
+    amountCents: direction === "BUY" && canBuy ? amountCents : undefined,
     sharesE8: direction === "SELL" && sellSharesE8 > 0n ? sellSharesE8 : undefined,
     enabled: connected && user.isConnected,
   });
@@ -102,15 +130,18 @@ export function TradePanelV3({
     balance.nextFaucetAtSec <= Math.floor(Date.now() / 1000);
 
   const insufficient = direction === "BUY" && amountCents > availableCents;
-  const marketClosed = !series.marketHours.open;
+  // Market-hours / closing checks only apply to the live current round.
+  // For past / resolved rounds, sell is always permitted regardless.
+  const marketClosed = isCurrentRound && !series.marketHours.open;
   const roundClosing =
+    isCurrentRound &&
     series.currentCloseTimeSec - Math.floor(Date.now() / 1000) <= 5;
 
   // Action handlers
   function placeBet() {
     bet.mutate({
       seriesId: series.seriesId as SeriesId,
-      roundIdx: series.currentRoundIdx,
+      roundIdx,
       side,
       amountCents,
     });
@@ -120,7 +151,7 @@ export function TradePanelV3({
     if (sellSharesE8 <= 0n || sellSharesE8 > positionSharesE8) return;
     sell.mutate({
       seriesId: series.seriesId as SeriesId,
-      roundIdx: series.currentRoundIdx,
+      roundIdx,
       side,
       sharesE8: sellSharesE8,
     });
@@ -183,19 +214,23 @@ export function TradePanelV3({
 
       <div className="border-t border-white/[0.06]" />
 
-      {/* BUY / SELL toggle */}
-      <div className="grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          onClick={() => setDirection("BUY")}
-          className={`py-2 rounded-md text-xs font-semibold uppercase tracking-wider transition ${
-            direction === "BUY"
-              ? "bg-accent-dim text-accent border border-accent/30"
-              : "bg-white/[0.04] text-white/40 border border-transparent hover:border-white/[0.12]"
-          }`}
-        >
-          Buy
-        </button>
+      {/* BUY / SELL toggle. BUY is hidden when the round can no longer be
+          bought (past / resolved / void) — SELL is always available so the
+          user can take their winnings (or zero out a losing position). */}
+      <div className={`grid gap-2 ${canBuy ? "grid-cols-2" : "grid-cols-1"}`}>
+        {canBuy && (
+          <button
+            type="button"
+            onClick={() => setDirection("BUY")}
+            className={`py-2 rounded-md text-xs font-semibold uppercase tracking-wider transition ${
+              direction === "BUY"
+                ? "bg-accent-dim text-accent border border-accent/30"
+                : "bg-white/[0.04] text-white/40 border border-transparent hover:border-white/[0.12]"
+            }`}
+          >
+            Buy
+          </button>
+        )}
         <button
           type="button"
           onClick={() => setDirection("SELL")}
@@ -210,10 +245,34 @@ export function TradePanelV3({
         </button>
       </div>
 
-      {/* Live AMM prices */}
+      {/* Round status header. Live rounds show a countdown; resolved / void
+          rounds show their final outcome instead. */}
       <div className="text-[10px] uppercase tracking-[2px] text-white/30">
-        Round {series.currentRoundIdx} · closes in{" "}
-        {formatCountdown(series.currentCloseTimeSec)}
+        {isCurrentRound && state === "OPEN" ? (
+          <>
+            Round {roundIdx} · closes in{" "}
+            {formatCountdown(series.currentCloseTimeSec)}
+          </>
+        ) : state === "RESOLVED" && resolvedOutcome ? (
+          <>
+            Round {roundIdx} · resolved{" "}
+            <span
+              className={
+                resolvedOutcome === "UP"
+                  ? "text-yes"
+                  : resolvedOutcome === "DOWN"
+                    ? "text-no"
+                    : "text-white/40"
+              }
+            >
+              {resolvedOutcome === "INVALID" ? "VOID" : resolvedOutcome} won
+            </span>
+          </>
+        ) : state === "VOID" ? (
+          <>Round {roundIdx} · voided · refund at cost</>
+        ) : (
+          <>Round {roundIdx} · closing</>
+        )}
       </div>
       <div className="grid grid-cols-2 gap-2">
         <button
@@ -396,17 +455,20 @@ export function TradePanelV3({
             sell.isPending ||
             sellSharesE8 <= 0n ||
             sellSharesE8 > positionSharesE8 ||
-            roundClosing ||
-            marketClosed
+            // Only block sells during the 5s pre-close window when this is
+            // the live current round. Past/resolved/void rounds: always sellable.
+            (isCurrentRound && state === "OPEN" && (roundClosing || marketClosed))
           }
           className="w-full py-3 rounded-md bg-accent text-black text-sm font-semibold hover:shadow-glow-sm transition disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {sell.isPending
             ? "Selling…"
-            : roundClosing
+            : isCurrentRound && state === "OPEN" && roundClosing
               ? "Round Closing…"
               : sellSharesE8 <= 0n
-                ? "Enter shares to sell"
+                ? positionSharesE8 === 0n
+                  ? "No shares to sell"
+                  : "Enter shares to sell"
                 : `Sell ${(Number(sellSharesE8) / 1e8).toFixed(2)} ${sideLabel(side)}`}
         </button>
       )}

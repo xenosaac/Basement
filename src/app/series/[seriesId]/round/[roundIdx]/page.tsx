@@ -5,10 +5,10 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { useUser } from "@/hooks/use-user";
 import { useOddsCurveV3 } from "@/hooks/use-odds-curve-v3";
-import { useSellV3, SellError, sellCodeToUserMessage } from "@/hooks/use-sell-v3";
+import { useSeriesV3 } from "@/hooks/use-series-v3";
 import { ProbabilityChart } from "@/components/probability-chart";
-import { renderSeriesQuestion, sideLabel, outcomeLabel } from "@/lib/utils";
-import type { SeriesId, BetSide } from "@/lib/types/v3-api";
+import { TradePanelV3 } from "@/components/trade-panel-v3";
+import { outcomeLabel, renderSeriesQuestion, sideLabel } from "@/lib/utils";
 
 interface CaseDetail {
   seriesId: string;
@@ -53,111 +53,6 @@ function centsToUsd(cents: string | number | null | undefined) {
   })}`;
 }
 
-function ResolvedSellPanel({
-  seriesId,
-  roundIdx,
-  state,
-  resolvedOutcome,
-  positions,
-}: {
-  seriesId: string;
-  roundIdx: number;
-  state: "OPEN" | "CLOSED" | "RESOLVED" | "VOID";
-  resolvedOutcome: "UP" | "DOWN" | "INVALID" | null;
-  positions: Array<{
-    side: "UP" | "DOWN";
-    sharesE8: string;
-    costBasisCents: string;
-  }>;
-}) {
-  const sell = useSellV3();
-  return (
-    <div className="mb-6">
-      <h2 className="text-xs uppercase tracking-wider mb-3 text-accent flex items-center gap-2">
-        Your shares — sell to redeem
-        <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
-      </h2>
-      <div className="space-y-2">
-        {positions.map((p) => {
-          const shares = BigInt(p.sharesE8);
-          const sharesNum = Number(shares) / 1e8;
-          const cost = Number(p.costBasisCents);
-          const winning =
-            state === "VOID"
-              ? true
-              : resolvedOutcome === p.side;
-          const pricePerShareCents =
-            state === "VOID" ? Math.round((cost / sharesNum) * 1) : winning ? 100 : 0;
-          // Proceeds: void = pro-rata cost basis, else shares × price
-          const proceedsCents =
-            state === "VOID"
-              ? cost
-              : Math.round(sharesNum * pricePerShareCents);
-          const profit = proceedsCents - cost;
-          const isPending =
-            sell.isPending &&
-            sell.variables?.side === p.side &&
-            sell.variables?.roundIdx === roundIdx;
-          return (
-            <div
-              key={p.side}
-              className="glass rounded-lg px-4 py-3 flex items-center justify-between gap-4 text-sm"
-            >
-              <span
-                className={`text-xs font-semibold uppercase ${p.side === "UP" ? "text-yes" : "text-no"}`}
-              >
-                {sideLabel(p.side)}
-              </span>
-              <span className="text-white/70 font-mono tabular-nums flex-1 text-right">
-                {sharesNum.toFixed(2)} sh @{" "}
-                {state === "VOID" ? "refund" : `${pricePerShareCents}¢`}
-              </span>
-              <span
-                className={`text-xs font-mono tabular-nums ${
-                  profit > 0
-                    ? "text-yes"
-                    : profit < 0
-                      ? "text-no"
-                      : "text-white/40"
-                }`}
-              >
-                {profit >= 0 ? "+" : ""}
-                ${(profit / 100).toFixed(2)}
-              </span>
-              {winning || state === "VOID" ? (
-                <button
-                  type="button"
-                  onClick={() =>
-                    sell.mutate({
-                      seriesId: seriesId as SeriesId,
-                      roundIdx,
-                      side: p.side as BetSide,
-                      sharesE8: shares,
-                    })
-                  }
-                  disabled={sell.isPending}
-                  className="px-3 py-1.5 rounded-md bg-accent text-black text-xs font-semibold hover:shadow-glow-sm transition disabled:opacity-50"
-                >
-                  {isPending
-                    ? "Selling…"
-                    : `Sell $${(proceedsCents / 100).toFixed(2)}`}
-                </button>
-              ) : (
-                <span className="text-xs text-white/30">No value</span>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      {sell.error instanceof SellError && (
-        <div className="mt-2 text-xs text-no">
-          {sellCodeToUserMessage(sell.error.code)}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function RoundOddsChart({
   seriesId,
   roundIdx,
@@ -200,6 +95,9 @@ export default function RoundDetailPage() {
   const { seriesId, roundIdx } = useParams<{ seriesId: string; roundIdx: string }>();
   const user = useUser();
   const address = user.isConnected && user.address ? user.address : undefined;
+  const { data: seriesList } = useSeriesV3();
+  const series = seriesList?.series.find((s) => s.seriesId === seriesId);
+  const roundIdxNum = Number(roundIdx);
 
   const { data, isLoading, error } = useQuery<CaseDetail>({
     queryKey: ["case-detail", seriesId, roundIdx, address],
@@ -362,15 +260,19 @@ export default function RoundDetailPage() {
         </div>
       </div>
 
-      {/* Sell controls for any positions still held (post-resolve redemption) */}
-      {data.myPositions.length > 0 && (isResolved || isVoid) && (
-        <ResolvedSellPanel
-          seriesId={data.seriesId}
-          roundIdx={data.roundIdx}
-          state={data.state}
-          resolvedOutcome={data.resolvedOutcome}
-          positions={data.myPositions}
-        />
+      {/* Trade panel — same component on every round state.
+          BUY is hidden when this isn't the live current OPEN round.
+          SELL is always available; /api/sell returns curve quote for OPEN
+          and fixed 100/0¢ for RESOLVED, cost-basis refund for VOID. */}
+      {series && (
+        <div className="mb-6">
+          <TradePanelV3
+            series={series}
+            roundIdx={roundIdxNum}
+            caseState={data.state}
+            resolvedOutcome={data.resolvedOutcome}
+          />
+        </div>
       )}
 
       {/* My orders for this round */}
