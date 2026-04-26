@@ -29,8 +29,9 @@ export interface BarrierStrikeInput {
   P0: number;
   sigmaAnnual: number;
   asOfSec: number;
-  /** z-quantile for the barrier crossing probability. Default 1.28 ≈ 90%
-   *  one-tail (≈ 80% expected seller win-rate after k_fat fudge). */
+  /** z-quantile for the barrier crossing probability. When undefined the
+   *  solver picks `Φ⁻¹(1 − targetTouchProb)`; default `targetTouchProb = 0.30`
+   *  gives z ≈ 0.524 (P(close > strike) ≈ 30%, 70/30 seller/buyer edge). */
   z?: number;
 }
 
@@ -47,13 +48,17 @@ export interface BarrierStrikeResult {
 }
 
 /** Per-asset quant defaults. Loaded from `ASSET_PARAMS` table; consumed by
- *  vol-estimator (fallback σ) and barrier-strike (kFat + clamp). */
+ *  vol-estimator (fallback σ) and barrier-strike (kFat + clamp).
+ *  `targetTouchProb` is optional: when set, overrides the global
+ *  `DEFAULT_TARGET_TOUCH_PROB = 0.30` for that asset, letting individual
+ *  markets dial the seller/buyer edge (e.g. 0.40 for tighter buyer odds). */
 export interface AssetParams {
   asset: string;
   defaultSigmaAnnual: number;
   kFat: number;
   minStrikeBps: number;
   maxStrikeBps: number;
+  targetTouchProb?: number;
 }
 
 /** Macro-calendar blackout decision. Cron callers `if (blackout) skip`. */
