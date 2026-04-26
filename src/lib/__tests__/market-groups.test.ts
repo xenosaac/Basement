@@ -406,3 +406,23 @@ describe("isMarketOpen consults strategy.marketHours for dynamic-strike groups",
     expect(isMarketOpen(qqq!, utc("2026-04-27T14:30:00"))).toBe(true);
   });
 });
+
+describe("MARKET_GROUPS expo invariant (slot G)", () => {
+  it("every dynamic-strike / create_market group has priceExpo === spawnStrategy.pythExpo", () => {
+    for (const [groupId, spec] of Object.entries(MARKET_GROUPS)) {
+      const kind = spec.spawnStrategy.kind;
+      if (
+        kind === "create_market_dynamic_strike" ||
+        kind === "create_market"
+      ) {
+        // Both kinds have a pythExpo field on the strategy.
+        const strategyExpo = (spec.spawnStrategy as { pythExpo: number })
+          .pythExpo;
+        expect(
+          strategyExpo,
+          `${groupId}: priceExpo (${spec.priceExpo}) must equal spawnStrategy.pythExpo (${strategyExpo}) — UI rendering depends on priceExpo, cron spawn depends on pythExpo, and both must match the actual Pyth feed expo on hermes-beta`,
+        ).toBe(spec.priceExpo);
+      }
+    }
+  });
+});

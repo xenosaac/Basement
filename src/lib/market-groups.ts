@@ -573,6 +573,11 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
 
   // --- Commodity ---------------------------------------------------------
 
+  // 2026-04-25 Slot G fix: XAU/XPT precious-metal feeds publish at expo -3
+  // and XAG publishes at expo -5 on Pyth Hermes Beta (verified live; legacy
+  // `xau-daily-up` had XAU -3 correct). Phase C bulk-add for the hourly
+  // groups copied -8 from the crypto template by mistake, causing /markets
+  // to render Gold as $0.05 and Silver as $0.08.
   "xau-1h-up": {
     groupId: "xau-1h-up",
     assetSymbol: "XAU",
@@ -582,7 +587,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     pythFeedId: "",
     durationSec: 60 * 60,
     tickSize: 1n,
-    priceExpo: -8,
+    priceExpo: -3,
     displayTickRaw: 1n,
     poolDepth: 500_000_000n,
     spawnCadence: "on-resolve",
@@ -592,7 +597,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
       strikeKind: "absolute_above",
       volSource: "rolling-7d-realized",
       marketHours: "fx-24x5",
-      pythExpo: -8,
+      pythExpo: -3,
       marketType: MARKET_TYPE_DAILY_STRIKE,
       maxStalenessSec: 300,
       feeBps: 200,
@@ -610,7 +615,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     pythFeedId: "",
     durationSec: 60 * 60,
     tickSize: 1n,
-    priceExpo: -8,
+    priceExpo: -3,
     displayTickRaw: 1n,
     poolDepth: 500_000_000n,
     spawnCadence: "on-resolve",
@@ -620,7 +625,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
       strikeKind: "absolute_below",
       volSource: "rolling-7d-realized",
       marketHours: "fx-24x5",
-      pythExpo: -8,
+      pythExpo: -3,
       marketType: MARKET_TYPE_DAILY_STRIKE,
       maxStalenessSec: 300,
       feeBps: 200,
@@ -630,6 +635,9 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     active: false,
   },
 
+  // 2026-04-25 Slot G fix: XAG publishes at expo -5 on Pyth Hermes Beta
+  // (verified live, raw=7571750 → $75.72). Differs from XAU/XPT at -3 —
+  // do not assume "all precious metals are -3"; trust the live feed.
   "xag-1h-up": {
     groupId: "xag-1h-up",
     assetSymbol: "XAG",
@@ -639,7 +647,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     pythFeedId: "",
     durationSec: 60 * 60,
     tickSize: 1n,
-    priceExpo: -8,
+    priceExpo: -5,
     displayTickRaw: 1n,
     poolDepth: 500_000_000n,
     spawnCadence: "on-resolve",
@@ -649,7 +657,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
       strikeKind: "absolute_above",
       volSource: "rolling-7d-realized",
       marketHours: "fx-24x5",
-      pythExpo: -8,
+      pythExpo: -5,
       marketType: MARKET_TYPE_DAILY_STRIKE,
       maxStalenessSec: 300,
       feeBps: 200,
@@ -667,7 +675,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     pythFeedId: "",
     durationSec: 60 * 60,
     tickSize: 1n,
-    priceExpo: -8,
+    priceExpo: -5,
     displayTickRaw: 1n,
     poolDepth: 500_000_000n,
     spawnCadence: "on-resolve",
@@ -677,7 +685,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
       strikeKind: "absolute_below",
       volSource: "rolling-7d-realized",
       marketHours: "fx-24x5",
-      pythExpo: -8,
+      pythExpo: -5,
       marketType: MARKET_TYPE_DAILY_STRIKE,
       maxStalenessSec: 300,
       feeBps: 200,
@@ -687,6 +695,10 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     active: false,
   },
 
+  // 2026-04-25 Slot G fix: XPT (Platinum) publishes at expo -3 on Pyth
+  // Hermes Beta (verified live, raw=2016472 → $2,016.47). active:false
+  // but fixed for consistency to satisfy the priceExpo === pythExpo
+  // invariant (and so when activated the UI renders correctly).
   "xpt-1h-up": {
     groupId: "xpt-1h-up",
     assetSymbol: "XPT",
@@ -696,7 +708,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     pythFeedId: "",
     durationSec: 60 * 60,
     tickSize: 1n,
-    priceExpo: -8,
+    priceExpo: -3,
     displayTickRaw: 1n,
     poolDepth: 500_000_000n,
     spawnCadence: "on-resolve",
@@ -706,7 +718,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
       strikeKind: "absolute_above",
       volSource: "rolling-7d-realized",
       marketHours: "fx-24x5",
-      pythExpo: -8,
+      pythExpo: -3,
       marketType: MARKET_TYPE_DAILY_STRIKE,
       maxStalenessSec: 300,
       feeBps: 200,
@@ -724,7 +736,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     pythFeedId: "",
     durationSec: 60 * 60,
     tickSize: 1n,
-    priceExpo: -8,
+    priceExpo: -3,
     displayTickRaw: 1n,
     poolDepth: 500_000_000n,
     spawnCadence: "on-resolve",
@@ -734,7 +746,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
       strikeKind: "absolute_below",
       volSource: "rolling-7d-realized",
       marketHours: "fx-24x5",
-      pythExpo: -8,
+      pythExpo: -3,
       marketType: MARKET_TYPE_DAILY_STRIKE,
       maxStalenessSec: 300,
       feeBps: 200,
@@ -744,6 +756,11 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     active: false,
   },
 
+  // 2026-04-25 Slot G: Brent feed id not configured in local .env, so live
+  // Pyth Hermes Beta expo could not be verified during the slot G fix.
+  // Registry value -8 retained pending verification. Both groups are
+  // active:false; before activation, run a live curl against the feed and
+  // re-align priceExpo / pythExpo if they don't match.
   "brent-1d-up": {
     groupId: "brent-1d-up",
     assetSymbol: "BRENT",
