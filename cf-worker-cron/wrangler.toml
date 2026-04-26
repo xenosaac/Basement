@@ -1,6 +1,8 @@
 name = "basement-cron"
 main = "src/index.ts"
 compatibility_date = "2026-04-01"
+# Cron-only worker: no HTTP entry point needed.
+workers_dev = false
 
 # Three cron triggers; routes branch on event.cron in src/index.ts
 [triggers]

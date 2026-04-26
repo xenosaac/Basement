@@ -1,15 +1,14 @@
-/**
- * Basement cron trigger — Cloudflare Workers Cron Triggers fire on schedule
- * and POST to the Vercel-hosted cron routes with Bearer auth. Substitutes
- * for Vercel Hobby's missing minute-frequency cron support.
- *
- * Schedules (declared in wrangler.toml [triggers].crons):
- *   - "* * * * *"      → MINUTE_ROUTES (4 routes, every minute)
- *   - "*/5 * * * *"    → FIVE_MIN_ROUTES (eco-settle)
- *   - "0 13 * * *"     → DAILY_ROUTES (eco-spawn at 13:00 UTC)
- *
- * Free tier budget: ~7.5k req/day = 7.5% of Cloudflare Workers free quota.
- */
+// Basement cron trigger — Cloudflare Workers Cron Triggers fire on schedule
+// and POST to the Vercel-hosted cron routes with Bearer auth. Substitutes
+// for Vercel Hobby's missing minute-frequency cron support.
+//
+// Schedules (declared in wrangler.toml [triggers].crons):
+//   "* * * * *"     → MINUTE_ROUTES (4 routes, every minute)
+//   "* / 5 * * * *" → FIVE_MIN_ROUTES (eco-settle; written with spaces here
+//                     because JSDoc terminator clashes with literal cron syntax)
+//   "0 13 * * *"    → DAILY_ROUTES (eco-spawn at 13:00 UTC)
+//
+// Free tier budget: ~7.5k req/day = 7.5% of Cloudflare Workers free quota.
 
 export interface Env {
   /** Production base URL of the Vercel deployment, e.g. https://basement.xiangliu.net */
