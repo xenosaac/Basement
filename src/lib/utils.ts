@@ -79,10 +79,14 @@ export function outcomeLabel(
  *     "Will X break {above|below} a dynamic level in the next N?" so we never
  *     surface "$NaN" / "$undefined".
  *
- * `strikePriceE8` is the Pyth-native price scaled by 10^8 (NOT by `priceExpo`).
- * `priceExpo` is kept on the contract for forward-compat with feeds whose
- * native exponent isn't -8 (e.g. equities at -5); the e8 normalization here
- * matches what cases_v3 stores and what `formatBarrierPriceFromE8` consumes.
+ * `strikePriceE8` is the case row's `strike_price_e8` column. DESPITE the
+ * "e8" name, the value is stored at the feed's native expo (XAU: -3,
+ * QQQ/NVDA: -5, crypto: -8) — not at e-8. The "e8" suffix is a historical
+ * naming bug we keep for backwards compat with the schema column.
+ *
+ * Caller MUST pass `priceExpo` so the formatter can divide by 10^|priceExpo|.
+ * Slot F-2 (spawn-helpers) writes at feed expo; Slot F-3 (this file) reads
+ * at feed expo.
  */
 export function renderSeriesQuestion(opts: {
   pair: string; // e.g. "BTC/USDC"
@@ -105,7 +109,17 @@ export function renderSeriesQuestion(opts: {
   }
 
   const direction = kind === "absolute_above" ? "above" : "below";
-  const formatted = formatStrikeFromE8(opts.strikePriceE8);
+  const formatted = formatStrikeFromE8(opts.strikePriceE8, opts.priceExpo ?? -8);
+  if (
+    process.env.NODE_ENV !== "production" &&
+    opts.priceExpo === undefined &&
+    opts.strikePriceE8 != null
+  ) {
+    // dev-only nudge: caller hasn't migrated to pass priceExpo
+    console.warn(
+      `[renderSeriesQuestion] caller for ${opts.pair} did not pass priceExpo; defaulting to -8 which will misformat XAU/QQQ/NVDA`,
+    );
+  }
   if (formatted == null) {
     return `Will ${asset} break ${direction} a dynamic level in the next ${readable}?`;
   }
@@ -113,40 +127,41 @@ export function renderSeriesQuestion(opts: {
 }
 
 /**
- * Local helper — convert a Pyth-native e8 strike (stringified bigint or
- * bigint) to a USD display string `$1,234.56`. Returns `null` when the
- * strike is missing / unparseable so the caller can render a "dynamic
- * level" fallback instead of a literal "$—".
+ * Local helper — convert a Pyth strike (stringified bigint, bigint, or
+ * number) at the given `priceExpo` to a USD display string `$1,234.56`.
+ * Returns `null` when the input is missing / unparseable so the caller can
+ * render a "dynamic level" fallback instead of a literal "$—".
  *
- * Mirrors `formatBarrierPriceFromE8` from `case-copy.ts` but returns null
- * (rather than the sentinel "$—") so the caller can branch cleanly. We
- * inline rather than import to keep `utils.ts` free of cross-module deps —
- * the formatting math is tiny and stable.
+ * `priceExpo` MUST be a non-positive integer matching the Pyth feed:
+ *   XAU/XAG: -3, QQQ/NVDA: -5, crypto (BTC/ETH/SOL/HYPE): -8.
+ * Despite this helper's name, the input is stored at the feed's native
+ * expo, not at e-8 — the "E8" suffix is a historical naming bug.
+ *
+ * Slot F-2 (spawn-helpers) writes `strike_price_e8` at feed expo; this
+ * helper is the read-side mirror.
  */
 function formatStrikeFromE8(
-  priceE8: string | bigint | null | undefined,
+  raw: bigint | string | number | null | undefined,
+  priceExpo: number,
 ): string | null {
-  if (priceE8 == null) return null;
-  let n: bigint;
+  if (raw === null || raw === undefined) return null;
+  if (!Number.isFinite(priceExpo) || priceExpo > 0) {
+    // dev-time guard: priceExpo MUST be a non-positive integer (-8, -5, -3 …)
+    throw new Error(
+      `formatStrikeFromE8: priceExpo must be a non-positive number, got ${priceExpo}`,
+    );
+  }
+  let big: bigint;
   try {
-    n = typeof priceE8 === "bigint" ? priceE8 : BigInt(priceE8);
+    big = typeof raw === "bigint" ? raw : BigInt(raw as string | number);
   } catch {
     return null;
   }
-  if (n === 0n) return null;
-  const SCALE = 100_000_000n;
-  const sign = n < 0n ? "-" : "";
-  const abs = n < 0n ? -n : n;
-  const intUsd = abs / SCALE;
-  const fracE8 = abs % SCALE;
-  const ROUND_HALF = 500_000n; // 0.5 cent in e8 units
-  let cents = (fracE8 + ROUND_HALF) / 1_000_000n; // 0..100
-  let intPart = intUsd;
-  if (cents >= 100n) {
-    intPart = intUsd + 1n;
-    cents = 0n;
-  }
-  const intFmt = intPart.toLocaleString("en-US");
-  const centsStr = cents.toString().padStart(2, "0");
-  return `${sign}$${intFmt}.${centsStr}`;
+  if (big === 0n) return "$0";
+  const scale = Math.pow(10, -priceExpo); // -3 → 1000, -5 → 100000, -8 → 1e8
+  const usd = Number(big) / scale;
+  return `$${usd.toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })}`;
 }
