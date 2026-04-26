@@ -18,9 +18,9 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Basement | Prediction Markets on Base",
+  title: "Basement | Prediction Markets on Aptos",
   description:
-    "Prediction market demo with wallet-based identity and off-chain VirtualUSD credits.",
+    "Predict short-term price moves on crypto, commodities, and stocks. Connect your Aptos wallet, claim VirtualUSD, trade YES/NO in seconds.",
   icons: {
     icon: "/logo.png",
   },
