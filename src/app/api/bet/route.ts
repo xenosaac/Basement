@@ -9,6 +9,7 @@ import {
   computeRoundStart,
   getSeries,
   isMarketOpen,
+  resolveSeriesFeedId,
 } from "@/lib/series-config";
 import { getCachedPrice, pythE8ToCents } from "@/lib/pyth-hermes";
 import { quoteBuy } from "@/lib/quant";
@@ -77,7 +78,9 @@ export async function POST(request: NextRequest) {
   const placedAtSec = nowSec;
   const sideTyped = side as "UP" | "DOWN";
 
-  const liveTick = await getCachedPrice(series.pythFeedId).catch(() => null);
+  const liveTick = await getCachedPrice(resolveSeriesFeedId(series)).catch(
+    () => null,
+  );
   const lazyStartTimeSec = computeRoundStart(series, roundIdx);
   const lazyCloseTimeSec = computeRoundClose(series, roundIdx);
   const lazyStrikePriceE8 = liveTick?.priceE8 ?? null;

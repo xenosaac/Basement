@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-import { and, gt, inArray, asc } from "drizzle-orm";
+import { and, gt, inArray, asc, eq } from "drizzle-orm";
 import { db } from "@/db";
-import { priceTicksV3 } from "@/db/schema";
-import { SERIES_CONFIG } from "@/lib/series-config";
+import { priceTicksV3, seriesV3 } from "@/db/schema";
+import { resolveSeriesFeedId } from "@/lib/series-config";
+import { cachedView } from "@/lib/aptos-cache";
 import { pythE8ToCents } from "@/lib/pyth-hermes";
 import type {
   SeriesId,
@@ -39,23 +40,47 @@ export async function GET(req: Request) {
     MAX_LIMIT,
   );
 
-  const allowedIds = new Set<SeriesId>(SERIES_CONFIG.map((s) => s.seriesId));
+  // DB-driven series list (matches /api/series). Cached 60s in-process.
+  const activeRows = await cachedView(
+    "series:ticks-allowed",
+    60_000,
+    async () =>
+      db
+        .select({
+          seriesId: seriesV3.seriesId,
+          assetSymbol: seriesV3.assetSymbol,
+          pythFeedId: seriesV3.pythFeedId,
+        })
+        .from(seriesV3)
+        .where(eq(seriesV3.isActive, 1)),
+  );
+
+  const allowedIds = new Set<SeriesId>(activeRows.map((r) => r.seriesId));
   const ids: SeriesId[] = idsParam
     ? idsParam
         .split(",")
         .map((s) => s.trim() as SeriesId)
         .filter((s) => allowedIds.has(s))
-    : SERIES_CONFIG.map((s) => s.seriesId);
+    : activeRows.map((r) => r.seriesId);
 
   if (ids.length === 0) {
     const empty: SeriesTicksResponse = { windowSec, ticks: {} };
     return NextResponse.json(empty);
   }
 
+  // Resolve each series' live feed id via env (rolling) or DB snapshot
+  // (ECO/historical). Lower-cased for the inArray match against the audit
+  // table — Pyth Hermes returns ids unprefixed and lower-case; we store
+  // them as-fetched.
   const feedIdToSeriesId = new Map<string, SeriesId>();
-  for (const s of SERIES_CONFIG) {
-    if (ids.includes(s.seriesId)) {
-      feedIdToSeriesId.set(s.pythFeedId, s.seriesId);
+  for (const r of activeRows) {
+    if (!ids.includes(r.seriesId)) continue;
+    try {
+      feedIdToSeriesId.set(resolveSeriesFeedId(r).toLowerCase(), r.seriesId);
+    } catch {
+      // Skip rows whose feed id cannot resolve — leaves their bucket empty
+      // in the response rather than 500ing the entire ticks endpoint.
+      continue;
     }
   }
   const feedIds = Array.from(feedIdToSeriesId.keys());
@@ -81,7 +106,7 @@ export async function GET(req: Request) {
   // (most recent N points — Polymarket-style sparkline shows recent history).
   const fullBySeries: Partial<Record<SeriesId, SeriesTick[]>> = {};
   for (const row of rows) {
-    const seriesId = feedIdToSeriesId.get(row.pythFeedId);
+    const seriesId = feedIdToSeriesId.get(row.pythFeedId.toLowerCase());
     if (!seriesId) continue;
     const arr = fullBySeries[seriesId] ?? (fullBySeries[seriesId] = []);
     arr.push({

@@ -5,7 +5,6 @@ import Link from "next/link";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { useUser } from "@/hooks/use-user";
 import { useBalanceV3 } from "@/hooks/use-balance-v3";
-import { useOrdersV3 } from "@/hooks/use-orders-v3";
 import { usePositionsV3 } from "@/hooks/use-positions-v3";
 import { useFaucetV3 } from "@/hooks/use-faucet-v3";
 import { useSellV3, SellError, sellCodeToUserMessage } from "@/hooks/use-sell-v3";
@@ -28,8 +27,7 @@ export default function PortfolioPage() {
   const user = useUser();
   const address = user.isConnected && user.address ? user.address : undefined;
   const { data: balance, isLoading: balanceLoading } = useBalanceV3(address);
-  const { data: ordersData, isLoading: ordersLoading } = useOrdersV3(address);
-  const { data: positionsData } = usePositionsV3(address);
+  const { data: positionsData, isLoading: positionsLoading } = usePositionsV3(address);
   const sell = useSellV3();
   const faucet = useFaucetV3();
 
@@ -51,13 +49,13 @@ export default function PortfolioPage() {
     );
   }
 
-  const orders = ordersData?.orders ?? [];
-  const resolvedOrders = orders.filter(
-    (o) => o.caseState === "RESOLVED" || o.caseState === "VOID",
-  );
   const allPositions = positionsData?.positions ?? [];
   const positions = allPositions.filter((p) => p.status === "OPEN");
   const claimable = allPositions.filter((p) => p.status === "CLAIMABLE");
+  // CLAIMED = 已 sell 干净 + 已 resolve。realizedPnlCents 是这一行的权威 P&L
+  // （单一书写源：sell route + resolve cron 已经累计过 BUY/SELL/resolve 的所有 delta），
+  // 直接渲染，不要走 /api/orders 按事件分散计算 — 那条路径在 BUY+SELL 组合下会失真。
+  const resolvedPositions = allPositions.filter((p) => p.status === "CLAIMED");
 
   const nowSec = Math.floor(Date.now() / 1000);
   const canClaim =
@@ -263,37 +261,36 @@ export default function PortfolioPage() {
         </div>
       )}
 
-      {/* Resolved */}
-      {resolvedOrders.length > 0 && (
+      {/* Resolved (per-round aggregate; realizedPnlCents is canonical lifetime P&L for this round/side). */}
+      {resolvedPositions.length > 0 && (
         <div>
           <h2 className="text-xs text-white/35 uppercase tracking-wider mb-3">
-            Resolved ({resolvedOrders.length})
+            Resolved ({resolvedPositions.length})
           </h2>
           <div className="space-y-2">
-            {resolvedOrders.slice(0, 30).map((o) => {
-              const profit =
-                Number(o.payoutCents ?? 0) - Number(o.amountCents);
-              const won = profit > 0;
+            {resolvedPositions.slice(0, 30).map((p) => {
+              const pnl = Number(p.realizedPnlCents);
+              const won = pnl > 0;
               return (
                 <Link
-                  key={o.orderId}
-                  href={`/series/${o.seriesId}/round/${o.roundIdx}`}
+                  key={`resolved-${p.seriesId}-${p.roundIdx}-${p.side}`}
+                  href={`/series/${p.seriesId}/round/${p.roundIdx}`}
                   className="glass rounded-lg px-5 py-3 flex items-center justify-between gap-4 hover:border-white/[0.18] border border-transparent transition"
                 >
                   <div>
                     <p className="text-sm text-white/70">
-                      {o.seriesId} · Round {o.roundIdx}
+                      {p.seriesId} · Round {p.roundIdx}
                     </p>
                     <p className="text-xs text-white/40 mt-1">
-                      {sideLabel(o.side)} {centsToUsd(o.amountCents)} → outcome{" "}
-                      {outcomeLabel(o.resolvedOutcome) ?? "—"}
+                      {sideLabel(p.side)} → outcome{" "}
+                      {outcomeLabel(p.resolvedOutcome) ?? "—"}
                     </p>
                   </div>
                   <span
-                    className={`text-sm font-mono tabular-nums ${won ? "text-yes" : profit === 0 ? "text-white/40" : "text-no"}`}
+                    className={`text-sm font-mono tabular-nums ${won ? "text-yes" : pnl === 0 ? "text-white/40" : "text-no"}`}
                   >
-                    {profit >= 0 ? "+" : ""}
-                    {centsToUsd(profit)}
+                    {pnl >= 0 ? "+" : ""}
+                    {centsToUsd(pnl)}
                   </span>
                 </Link>
               );
@@ -302,7 +299,7 @@ export default function PortfolioPage() {
         </div>
       )}
 
-      {!ordersLoading && positions.length === 0 && claimable.length === 0 && resolvedOrders.length === 0 && (
+      {!positionsLoading && positions.length === 0 && claimable.length === 0 && resolvedPositions.length === 0 && (
         <div className="text-center py-16 text-white/40">
           <p className="mb-3">No bets yet.</p>
           <Link

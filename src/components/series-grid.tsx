@@ -5,11 +5,11 @@ import { useSeriesV3 } from "@/hooks/use-series-v3";
 import { SeriesCardV2 } from "@/components/series-card-v2";
 import type { SeriesCategory, SeriesSummary } from "@/lib/types/v3-api";
 
-type TabValue = "all" | "all_crypto" | "commodity" | "stocks" | "others";
+type TabValue = "all" | "crypto" | "commodity" | "stocks" | "others";
 
 const CATEGORIES: { label: string; value: TabValue }[] = [
   { label: "All", value: "all" },
-  { label: "All Crypto", value: "all_crypto" },
+  { label: "Crypto", value: "crypto" },
   { label: "Commodity", value: "commodity" },
   { label: "Stocks", value: "stocks" },
   { label: "Others", value: "others" },
@@ -41,7 +41,7 @@ export function SeriesGrid() {
     const quickPlay = all.filter((s) => QUICK_PLAY_IDS.has(s.seriesId));
     const byTab: Record<TabValue, SeriesSummary[]> = {
       all,
-      all_crypto: all.filter((s) => CRYPTO_CATEGORIES.includes(s.category)),
+      crypto: all.filter((s) => CRYPTO_CATEGORIES.includes(s.category)),
       commodity: all.filter((s) => COMMODITY_CATEGORIES.includes(s.category)),
       stocks: all.filter((s) => STOCKS_CATEGORIES.includes(s.category)),
       others: all.filter((s) => !KNOWN_CATEGORIES.includes(s.category)),

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { and, desc, eq, ne, or, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { casesV3, positionsV3 } from "@/db/schema";
-import { curvePrices } from "@/lib/quant";
+import { quoteSell } from "@/lib/quant";
 import type { ApiErrorResponse, PositionsResponse } from "@/lib/types/v3-api";
 
 export const dynamic = "force-dynamic";
@@ -88,13 +88,24 @@ export async function GET(request: NextRequest) {
     }
 
     // Mark value = 用户此刻 sell 完所有 shares 能拿到的钱。
+    // OPEN 走 pm-AMM 全曲线 quoteSell（积分），不是 marginal × shares —— 后者
+    // 在 thin pool / 大 holding 下显著高估，会让 portfolio 显示假浮盈而真卖
+    // 出又拿不到那么多（用户 round 950 self-contradiction 的根因之一）。
     let markValueCents: bigint | null = null;
     let unrealizedPnlCents: bigint | null = null;
     if (status === "OPEN" && r.upSharesE8 != null && r.downSharesE8 != null) {
-      // 现行 pm-AMM curve marginal price（近似 — 真 sell quote 在 /api/quote）
-      const prices = curvePrices(r.upSharesE8, r.downSharesE8);
-      const sidePriceCents = r.side === "UP" ? prices.upCents : prices.downCents;
-      markValueCents = (r.sharesE8 * BigInt(sidePriceCents)) / 100_000_000n;
+      try {
+        const q = quoteSell(
+          r.upSharesE8,
+          r.downSharesE8,
+          r.side as "UP" | "DOWN",
+          r.sharesE8,
+        );
+        markValueCents = q.proceedsCents;
+      } catch {
+        // pool 为空 / 异常状态 → 保守用 0，让用户至少看到 cost-basis 全损耗
+        markValueCents = 0n;
+      }
       unrealizedPnlCents = markValueCents - r.costBasisCents;
       totalMark += markValueCents;
     } else if (status === "CLAIMABLE") {
@@ -130,14 +141,15 @@ export async function GET(request: NextRequest) {
       // it's just "what user gets if they SELL all remaining shares now".
       claimableCents:
         status === "CLAIMABLE" ? markValueCents!.toString() : null,
+      caseState: (r.caseState ?? "OPEN") as "OPEN" | "CLOSED" | "RESOLVED" | "VOID",
+      resolvedOutcome: (r.resolvedOutcome ?? null) as "UP" | "DOWN" | "INVALID" | null,
     };
   });
 
-  // 只返回还持有筹码的行（OPEN + CLAIMABLE）。已 sell 干净的 (CLAIMED/LOST)
-  // 不返回 — totalRealized 已经累计过它们的历史 P&L。
-  const visible = positions.filter(
-    (p) => p.status === "OPEN" || p.status === "CLAIMABLE",
-  );
+  // OPEN + CLAIMABLE = 仍持有筹码（trade panel 用）。
+  // CLAIMED       = 已 sell 干净 + 已 resolve（portfolio 历史区块用，realizedPnlCents 是权威 P&L）。
+  // LOST 是兜底分支，理论不触发，安全起见排除。
+  const visible = positions.filter((p) => p.status !== "LOST");
 
   const response: PositionsResponse = {
     positions: visible,

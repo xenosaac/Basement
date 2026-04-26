@@ -17,6 +17,7 @@
 import { sql, and, eq, gte, lte, asc } from "drizzle-orm";
 import { db } from "@/db";
 import { priceTicksV3, seriesV3 } from "@/db/schema";
+import { resolveSeriesFeedId } from "@/lib/series-config";
 import type { AssetParams, VolEstimate } from "./types";
 import { getAssetParams } from "./asset-params";
 import { SECONDS_PER_YEAR } from "./barrier-strike";
@@ -151,18 +152,29 @@ export async function computeRealizedVol7d(
     source: "fallback",
   });
 
-  // Resolve series → Pyth feed id.
+  // Resolve series → Pyth feed id. Prefer live env value via assetSymbol;
+  // fall back to the row's snapshotted pythFeedId for ECO/historical rows.
   const seriesRow = await db
-    .select({ pythFeedId: seriesV3.pythFeedId })
+    .select({
+      assetSymbol: seriesV3.assetSymbol,
+      pythFeedId: seriesV3.pythFeedId,
+    })
     .from(seriesV3)
     .where(eq(seriesV3.seriesId, seriesId))
     .limit(1);
-  if (seriesRow.length === 0 || !seriesRow[0].pythFeedId) {
+  if (seriesRow.length === 0) {
     const est = fallbackEstimate();
     CACHE.set(cacheKey, { estimate: est, expiresAt: Date.now() + CACHE_TTL_MS });
     return est;
   }
-  const feedId = seriesRow[0].pythFeedId;
+  let feedId: string;
+  try {
+    feedId = resolveSeriesFeedId(seriesRow[0]);
+  } catch {
+    const est = fallbackEstimate();
+    CACHE.set(cacheKey, { estimate: est, expiresAt: Date.now() + CACHE_TTL_MS });
+    return est;
+  }
 
   // Pull tick samples in window.
   const lo = asOfSec - SEVEN_DAYS_SEC;

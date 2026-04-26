@@ -5,18 +5,21 @@ import {
   casesV3,
   positionsV3,
   priceTicksV3,
+  seriesV3,
 } from "@/db/schema";
 import {
-  SERIES_CONFIG,
   computeCurrentRoundIdx,
   computeRoundClose,
   computeRoundStart,
   isMarketOpen,
+  resolveSeriesFeedId,
   type SeriesStaticConfig,
 } from "@/lib/series-config";
-import { fetchPythBatchPrices, pythE8ToCents } from "@/lib/pyth-hermes";
+import { cachedView } from "@/lib/aptos-cache";
+import { fetchPythBatchPrices, lookupTick, pythE8ToCents } from "@/lib/pyth-hermes";
 import { computeOutcome } from "@/lib/parimutuel";
 import { computeBarrierOutcome } from "@/lib/barrier-resolve";
+import type { SeriesCategory } from "@/lib/types/v3-api";
 
 export const dynamic = "force-dynamic";
 
@@ -24,23 +27,63 @@ export const dynamic = "force-dynamic";
  * Single cron endpoint. Called every 30s by GitHub Actions (or similar external
  * trigger). Does three things atomically per invocation:
  *
- * 1. Refresh Pyth prices for all 7 series (single Hermes batch call)
+ * 1. Refresh Pyth prices for all active rolling series (single Hermes batch)
  * 2. Rotate rounds: for each series, ensure current round exists; close any
  *    expired OPEN rounds; resolve by outcome + settle payouts
  * 3. Record price_ticks for audit
  *
+ * **Source of truth (post 2026-04-24):**
+ *   - The series rotation list is read from `series_v3` (DB) — same loader
+ *     contract as `/api/series`. No more SERIES_CONFIG iteration.
+ *   - Pyth feed IDs are resolved per-series via `resolveSeriesFeedId(s)` →
+ *     `pythFeedIdForSymbol(assetSymbol)` → live `.env` value. Rotating an
+ *     env id picks up on the next tick without a deploy.
+ *
  * v0.5 (Phase E) settle path handles three `strikeKindCaptured` values:
  *   - 'absolute_above' / 'absolute_below' / null  → legacy `computeOutcome`
- *     (close vs strike threshold, INVALID on tie)
  *   - 'barrier_two_sided'                         → `computeBarrierOutcome`
- *     (UP iff price breached either barrier, DOWN if it stayed inside)
- * Series with `kind === 'event_driven'` (ECO / Phase G) are routed to the
- * dedicated `cron/eco-settle` cron and explicitly skipped here as a defensive
- * guard, in case an event_driven series ever leaks into SERIES_CONFIG.
+ * Series with `kind === 'event_driven'` (ECO) are settled by `cron/eco-settle`
+ * and filtered out by `getActiveRollingSeriesForTick()` below.
  *
  * Auth: Bearer ${CRON_SECRET}
  * Idempotent: safe to call concurrently (SERIALIZABLE tx on settle)
  */
+
+/**
+ * Active rolling series for the tick rotation loop. DB-driven, cached 60s
+ * in-process (matches /api/series contract). Each row is mapped through
+ * `rowToConfig` so `seriesV3.$inferSelect` shape never leaks downstream;
+ * downstream helpers continue to take `SeriesStaticConfig`.
+ *
+ * Filters: `is_active = 1` AND `kind` is null OR 'rolling'. ECO/event_driven
+ * goes through `cron/eco-settle`.
+ */
+async function getActiveRollingSeriesForTick(): Promise<SeriesStaticConfig[]> {
+  return cachedView("series:rolling-tick", 60_000, async () => {
+    const rows = await db
+      .select()
+      .from(seriesV3)
+      .where(eq(seriesV3.isActive, 1));
+    return rows
+      .filter((r) => r.kind == null || r.kind === "rolling")
+      .map(
+        (r): SeriesStaticConfig => ({
+          seriesId: r.seriesId,
+          assetSymbol: r.assetSymbol,
+          pair: r.pair,
+          category: r.category as SeriesCategory,
+          cadenceSec: r.cadenceSec,
+          // Snapshot kept as fallback only — `resolveSeriesFeedId` prefers env.
+          pythFeedId: r.pythFeedId,
+          marketHoursGated: r.marketHoursGated === 1,
+          feeBps: r.feeBps,
+          sortOrder: r.sortOrder,
+          seriesStartSec: r.seriesStartSec,
+        }),
+      );
+  });
+}
+
 export async function GET(request: Request) {
   const auth = request.headers.get("authorization") ?? "";
   const expected = `Bearer ${process.env.CRON_SECRET ?? ""}`;
@@ -64,8 +107,23 @@ export async function GET(request: Request) {
     errors: [] as Array<{ seriesId?: string; error: string }>,
   };
 
-  // 1. Refresh Pyth prices for all 7 feeds in one batch
-  const allFeedIds = SERIES_CONFIG.map((s) => s.pythFeedId);
+  const seriesList = await getActiveRollingSeriesForTick();
+
+  // 1. Refresh Pyth prices for all active feeds in one batch. Resolve via env;
+  // de-dupe (multiple series can share an asset symbol, e.g. BTC daily strike
+  // siblings).
+  const feedIdSet = new Set<string>();
+  for (const s of seriesList) {
+    try {
+      feedIdSet.add(resolveSeriesFeedId(s));
+    } catch (err) {
+      report.errors.push({
+        seriesId: s.seriesId,
+        error: `feed-id resolve: ${(err as Error).message}`,
+      });
+    }
+  }
+  const allFeedIds = Array.from(feedIdSet);
   let priceMap: Awaited<ReturnType<typeof fetchPythBatchPrices>> = new Map();
   try {
     priceMap = await fetchPythBatchPrices(allFeedIds);
@@ -85,7 +143,7 @@ export async function GET(request: Request) {
   }
 
   // 2. Per-series rotation
-  for (const series of SERIES_CONFIG) {
+  for (const series of seriesList) {
     try {
       await rotateSeriesRounds(series, nowSec, priceMap, report);
     } catch (err) {
@@ -124,7 +182,7 @@ async function rotateSeriesRounds(
   if (series.kind === "event_driven") return;
 
   const currentIdx = computeCurrentRoundIdx(series, nowSec);
-  const liveTick = priceMap.get(series.pythFeedId.toLowerCase());
+  const liveTick = lookupTick(priceMap, resolveSeriesFeedId(series));
 
   // Close + resolve any OPEN rounds past their close_time (could be prior cycles)
   const expired = await db
@@ -142,7 +200,7 @@ async function rotateSeriesRounds(
     await resolveCase(series, c.roundIdx as number, priceMap, report);
   }
 
-  // Spawn current round if not present AND market open (skip US500 off-hours)
+  // Spawn current round if not present AND market open (skip RTH-gated series off-hours)
   const hours = isMarketOpen(series, nowSec);
   if (!hours.open) return;
 
@@ -164,9 +222,9 @@ async function rotateSeriesRounds(
     let strikeTick = liveTick;
     if (!strikeTick) {
       try {
-        const feedId = series.pythFeedId;
+        const feedId = resolveSeriesFeedId(series);
         const retry = await fetchPythBatchPrices([feedId]);
-        strikeTick = retry.get(feedId.toLowerCase().replace(/^0x/, ""));
+        strikeTick = lookupTick(retry, feedId);
       } catch (err) {
         report.errors.push({
           seriesId: series.seriesId,
@@ -217,11 +275,12 @@ async function resolveCase(
 ) {
   // Use latest Pyth price (close-time price is best-effort; demo uses most
   // recent available — production would select tick closest to close_time).
-  const liveTick = priceMap.get(series.pythFeedId.toLowerCase());
+  const feedId = resolveSeriesFeedId(series);
+  const liveTick = lookupTick(priceMap, feedId);
   if (!liveTick) {
     report.errors.push({
       seriesId: series.seriesId,
-      error: `no Pyth tick for ${series.pythFeedId}, skipping resolve`,
+      error: `no Pyth tick for ${feedId}, skipping resolve`,
     });
     return;
   }

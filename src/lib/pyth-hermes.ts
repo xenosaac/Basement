@@ -51,6 +51,17 @@ function hermesBase(): string {
   );
 }
 
+/** Canonical lookup against a priceMap returned by `fetchPythBatchPrices`.
+ *  The map is keyed by lowercase feedId without the `0x` prefix; callers may
+ *  pass a feedId in either form. Always go through this helper to avoid the
+ *  silent miss that froze the v3 resolve loop. */
+export function lookupTick(
+  map: Map<string, PythPriceTick>,
+  feedId: string,
+): PythPriceTick | undefined {
+  return map.get(feedId.toLowerCase().replace(/^0x/, ""));
+}
+
 /** Fetch latest Pyth price for N feed IDs in one batch call.
  *  Returns a map keyed by feed_id (lowercase, no 0x). */
 export async function fetchPythBatchPrices(

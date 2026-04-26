@@ -1,14 +1,22 @@
 /**
- * Basement v3 series configuration — single source of truth for the 7
- * recurring prediction-market series. Used by:
- *   - cron/tick to spawn & resolve cases
- *   - API /api/series to return metadata
- *   - frontend hooks for UI rendering
+ * Basement v3 series configuration.
  *
- * Pyth feed IDs verified on Aptos mainnet (Agent E Round 2, 2026-04-23).
- * Testnet uses hermes-beta channel; same feed IDs.
+ * Single source of truth (post 2026-04-24):
+ *   - **Rolling series feed IDs** live in `.env` (PYTH_*_FEED_ID). Resolved
+ *     per request via `pythFeedIdForSymbol(assetSymbol)` in aptos.ts.
+ *   - **Series rotation list** (which seriesId/cadence/etc. is active) lives
+ *     in the `series_v3` DB table, materialized per-call via /api/series'
+ *     `getActiveRollingSeries()` and the equivalent loader used by cron/tick.
+ *   - **ECO event-driven series** keep their feed IDs snapshotted on the
+ *     config object below (and in DB on first spawn) — those instruments
+ *     don't have a stable env mapping (CPI/PCE/etc. are event-shot).
+ *
+ * The `SERIES_CONFIG` const is now a **seed-only reference** for fresh dev
+ * environments. Production reads come from DB + env. Do not append new
+ * rolling rows here — INSERT into series_v3 instead.
  */
 
+import { pythFeedIdForSymbol } from "./aptos";
 import type { SeriesCategory, SeriesId } from "./types/v3-api";
 
 /**
@@ -58,8 +66,17 @@ export interface SeriesStaticConfig {
   pair: string;
   category: SeriesCategory;
   cadenceSec: number;
-  /** 64-char hex, no 0x prefix — matches Pyth feed_id as used in Hermes API */
-  pythFeedId: string;
+  /**
+   * 64-char hex, no 0x prefix — matches Pyth feed_id as used in Hermes API.
+   *
+   * For **rolling** series this is OPTIONAL: callers should resolve via
+   * `resolveSeriesFeedId(s)` which prefers the live env value through
+   * `pythFeedIdForSymbol(assetSymbol)`. Used as fallback / snapshot only.
+   *
+   * For **event_driven** series (ECO) this is REQUIRED at the config level
+   * (those instruments don't have an env mapping).
+   */
+  pythFeedId?: string;
   /** Mon-Fri 9:30-16:00 ET for US stocks */
   marketHoursGated: boolean;
   /** Fee in basis points (200 = 2%). Taken from loser pool. */
@@ -82,15 +99,23 @@ export interface SeriesStaticConfig {
 export const SERIES_START_ANCHOR_SEC = 1776988800;
 
 /**
- * @deprecated As of v0.5+, the source of truth for active series is the
- * `series_v3` DB table — `/api/series` reads it directly via cachedView.
- * This const is retained for:
- *   1. First-time DB seed (`npm run db:seed`) on a fresh dev environment.
- *   2. Helper consumers (e.g. `cron/tick`) that still iterate the static
- *      list. Those callsites should migrate to a DB query when convenient.
+ * Seed reference for fresh dev environments.
  *
- * **Adding a new series**: do NOT append here. Either INSERT directly into
- * `series_v3` or use the future `npm run seed:series add` CLI (Phase B).
+ * Production runtime reads from `series_v3` DB rows (rotation/metadata) +
+ * `.env` PYTH_*_FEED_ID (live feed IDs resolved per-request). This array
+ * is consumed by:
+ *
+ *   1. First-time DB seed (`npm run db:seed`) on a fresh checkout.
+ *   2. Tests / type-check fixtures.
+ *
+ * **Adding a new rolling series**: do NOT append here. INSERT into
+ * `series_v3` and add the corresponding env var (or, for known assets,
+ * extend `pythFeedIdForSymbol` in aptos.ts).
+ *
+ * Note: rolling entries deliberately OMIT `pythFeedId`. The live feed ID
+ * is resolved at use-site via `resolveSeriesFeedId(s)` → env. Hardcoding
+ * a literal here was the duplication source we removed (env, DB row,
+ * and this array drifted apart silently).
  */
 export const SERIES_CONFIG: readonly SeriesStaticConfig[] = [
   {
@@ -99,7 +124,6 @@ export const SERIES_CONFIG: readonly SeriesStaticConfig[] = [
     pair: "BTC/USDC",
     category: "quick_play",
     cadenceSec: 180,
-    pythFeedId: "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
     marketHoursGated: false,
     feeBps: 200,
     sortOrder: 1,
@@ -111,22 +135,9 @@ export const SERIES_CONFIG: readonly SeriesStaticConfig[] = [
     pair: "ETH/USDC",
     category: "quick_play",
     cadenceSec: 180,
-    pythFeedId: "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
     marketHoursGated: false,
     feeBps: 200,
     sortOrder: 2,
-    seriesStartSec: SERIES_START_ANCHOR_SEC,
-  },
-  {
-    seriesId: "sol-usdc-3m",
-    assetSymbol: "SOL",
-    pair: "SOL/USDC",
-    category: "crypto_ext",
-    cadenceSec: 180,
-    pythFeedId: "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
-    marketHoursGated: false,
-    feeBps: 200,
-    sortOrder: 3,
     seriesStartSec: SERIES_START_ANCHOR_SEC,
   },
   {
@@ -135,7 +146,6 @@ export const SERIES_CONFIG: readonly SeriesStaticConfig[] = [
     pair: "XAU/USDC",
     category: "commodity",
     cadenceSec: 3600,
-    pythFeedId: "765d2ba906dbc32ca17cc11f5310a89e9ee1f6420508c63861f2f8ba4ee34bb2",
     marketHoursGated: false, // spot gold is 24/5; weekend gate optional
     feeBps: 200,
     sortOrder: 4,
@@ -147,37 +157,59 @@ export const SERIES_CONFIG: readonly SeriesStaticConfig[] = [
     pair: "XAG/USDC",
     category: "commodity",
     cadenceSec: 3600,
-    pythFeedId: "f2fb02c32b055c805e7238d628e5e9dadef274376114eb1f012337cabe93871e",
     marketHoursGated: false,
     feeBps: 200,
     sortOrder: 5,
     seriesStartSec: SERIES_START_ANCHOR_SEC,
   },
-  {
-    seriesId: "us500-usdc-1h",
-    assetSymbol: "US500",
-    pair: "US500/USDC",
-    category: "stocks",
-    cadenceSec: 3600,
-    pythFeedId: "19e09bb805456ada3979a7d1cbb4b6d63babc3a0f8e8a9509f68afa5c4c11cd5",
-    marketHoursGated: true, // NYSE hours
-    feeBps: 200,
-    sortOrder: 6,
-    seriesStartSec: SERIES_START_ANCHOR_SEC,
-  },
+  // us500-usdc-1h removed — hermes-beta has no SPY / S&P 500 feed.
+  // Stocks tab surfaces via QQQ ETF proxy when Phase D batch 4 activates.
   {
     seriesId: "hype-usdc-1h",
     assetSymbol: "HYPE",
     pair: "HYPE/USDC",
     category: "crypto_ext",
     cadenceSec: 3600,
-    pythFeedId: "4279e31cc369bbcc2faf022b382b080e32a8e689ff20fbc530d2a603eb6cd98b",
     marketHoursGated: false,
     feeBps: 200,
     sortOrder: 7,
     seriesStartSec: SERIES_START_ANCHOR_SEC,
   },
+  {
+    seriesId: "qqq-usdc-1d",
+    assetSymbol: "QQQ",
+    pair: "QQQ/USDC",
+    category: "stocks",
+    cadenceSec: 86400, // daily, NYSE 4PM ET close anchor
+    marketHoursGated: true, // NYSE RTH-only
+    feeBps: 200,
+    sortOrder: 8,
+    seriesStartSec: SERIES_START_ANCHOR_SEC,
+  },
 ];
+
+/**
+ * Canonical feed-id resolver for any series-shaped row (DB row or static
+ * config). Order:
+ *   1. Live env value via `pythFeedIdForSymbol(assetSymbol)` — the source
+ *      of truth for rolling series. Updates picked up next request.
+ *   2. The row's snapshotted `pythFeedId` field — for ECO event series,
+ *      DB rows carrying historical ids, or assets without env mapping.
+ *
+ * Throws if neither resolution path yields a value (caller has a bug or
+ * a misconfigured env / DB row).
+ */
+export function resolveSeriesFeedId(
+  s: { assetSymbol: string; pythFeedId?: string | null },
+): string {
+  const fromEnv = pythFeedIdForSymbol(s.assetSymbol);
+  if (fromEnv) return fromEnv;
+  if (s.pythFeedId && s.pythFeedId.trim()) return s.pythFeedId;
+  throw new Error(
+    `[series-config] Cannot resolve Pyth feed id for assetSymbol="${s.assetSymbol}": ` +
+      `no env mapping in pythFeedIdForSymbol() and no snapshot pythFeedId on row.`,
+  );
+}
 
 export const SERIES_BY_ID: Record<SeriesId, SeriesStaticConfig> =
   SERIES_CONFIG.reduce(
@@ -202,12 +234,17 @@ export function getSeries(id: string): SeriesStaticConfig | undefined {
 // guard inside `cron/tick/route.ts::rotateSeriesRounds`.
 
 /** Loose ECO series config — does NOT flow through strict SeriesId/Category
- * types in v3-api.ts (those are reserved for the rolling product surface). */
+ * types in v3-api.ts (those are reserved for the rolling product surface).
+ *
+ * `pythFeedId` is required here (overrides the optional declaration on the
+ * base `SeriesStaticConfig`): event-driven instruments don't have a stable
+ * env mapping, so each ECO config snapshots its own feed id. */
 export interface EcoSeriesConfig
-  extends Omit<SeriesStaticConfig, "seriesId" | "category" | "kind"> {
+  extends Omit<SeriesStaticConfig, "seriesId" | "category" | "kind" | "pythFeedId"> {
   seriesId: string;
   category: SeriesCategory;
   kind: "event_driven";
+  pythFeedId: string;
   eventDriven: EventDrivenSpec;
 }
 
@@ -367,7 +404,7 @@ export function computeRoundClose(
   return series.seriesStartSec + (roundIdx + 1) * series.cadenceSec;
 }
 
-/** NYSE hours gate for US500. Mon-Fri 9:30 am – 4:00 pm ET. */
+/** NYSE hours gate for RTH-restricted series (e.g. QQQ). Mon-Fri 9:30 am – 4:00 pm ET. */
 export function isMarketOpen(
   series: Pick<SeriesStaticConfig, "marketHoursGated">,
   nowSec: number = Math.floor(Date.now() / 1000),
