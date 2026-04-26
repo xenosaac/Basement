@@ -476,26 +476,36 @@ export function TradePanelV3({
             sell.isPending ||
             sellSharesE8 <= 0n ||
             sellSharesE8 > positionSharesE8 ||
-            // Only block sells during the 5s pre-close window when this is
-            // the live current round. Past/resolved/void rounds: always sellable.
-            (isCurrentRound && state === "OPEN" && (roundClosing || marketClosed))
+            // Block sells during the 5s pre-close window on the live round.
+            (isCurrentRound && state === "OPEN" && (roundClosing || marketClosed)) ||
+            // CLOSED is the brief settling window before RESOLVED — sell route
+            // also rejects with ROUND_CLOSED, so disable here for parity.
+            state === "CLOSED"
           }
           className="w-full py-3 rounded-md bg-accent text-black text-sm font-semibold hover:shadow-glow-sm transition disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {sell.isPending
             ? "Selling…"
-            : isCurrentRound && state === "OPEN" && roundClosing
-              ? "Round Closing…"
-              : sellSharesE8 <= 0n
-                ? positionSharesE8 === 0n
-                  ? "No shares to sell"
-                  : "Enter shares to sell"
-                : `Sell ${(Number(sellSharesE8) / 1e8).toFixed(2)} ${sideLabel(side)}`}
+            : state === "CLOSED"
+              ? "Settling…"
+              : isCurrentRound && state === "OPEN" && roundClosing
+                ? "Round Closing…"
+                : sellSharesE8 <= 0n
+                  ? positionSharesE8 === 0n
+                    ? "No shares to sell"
+                    : "Enter shares to sell"
+                  : `Sell ${(Number(sellSharesE8) / 1e8).toFixed(2)} ${sideLabel(side)}`}
         </button>
       )}
 
       <div className="text-[10px] text-white/30 text-center leading-relaxed">
-        {renderSeriesQuestion({ pair: series.pair, cadenceSec: series.cadenceSec })}
+        {renderSeriesQuestion({
+          pair: series.pair,
+          cadenceSec: series.cadenceSec,
+          strikeKind: series.strikeKind,
+          strikePriceE8: series.strikePriceE8,
+          priceExpo: series.priceExpo,
+        })}
         <br />
         Paradigm pm-AMM curve · sell anytime before resolve · winners get $1/share
       </div>

@@ -23,8 +23,8 @@ const ASSET_TINTS: Record<string, { bg: string; fg: string }> = {
   SOL: { bg: "bg-[#a78bfa]/20", fg: "text-[#a78bfa]" },
   XAU: { bg: "bg-[#ffd700]/20", fg: "text-[#ffd700]" },
   XAG: { bg: "bg-[#c0c0c0]/20", fg: "text-[#c0c0c0]" },
-  US500: { bg: "bg-[#3b82f6]/20", fg: "text-[#3b82f6]" },
   HYPE: { bg: "bg-[#22d3ee]/20", fg: "text-[#22d3ee]" },
+  QQQ: { bg: "bg-[#0ea5e9]/20", fg: "text-[#0ea5e9]" },
 };
 
 export function AssetIcon({
@@ -45,7 +45,7 @@ export function AssetIcon({
       style={{ width: size, height: size }}
       aria-hidden="true"
     >
-      {symbol.slice(0, symbol === "US500" ? 3 : 1)}
+      {symbol.slice(0, symbol === "QQQ" ? 3 : 1)}
     </div>
   );
 }
@@ -118,7 +118,13 @@ export function SeriesCardV2({
   variant = "default",
 }: SeriesCardV2Props) {
   const isHero = variant === "hero";
-  const question = renderSeriesQuestion({ pair: s.pair, cadenceSec: s.cadenceSec });
+  const question = renderSeriesQuestion({
+    pair: s.pair,
+    cadenceSec: s.cadenceSec,
+    strikeKind: s.strikeKind,
+    strikePriceE8: s.strikePriceE8,
+    priceExpo: s.priceExpo,
+  });
   const countdown = countdownLabel(s.currentCloseTimeSec, nowMs);
   const closing =
     s.currentCloseTimeSec - Math.floor(nowMs / 1000) <= 0;
@@ -177,7 +183,7 @@ export function SeriesCardV2({
                 {s.pair}
               </div>
               <div className="text-[10px] uppercase tracking-[2px] text-white/30">
-                {s.cadenceSec === 180 ? "3-min" : "1-hour"}
+                {s.cadenceSec === 180 ? "3-min" : s.cadenceSec === 900 ? "15-min" : s.cadenceSec === 86400 ? "1-day" : "1-hour"}
               </div>
             </div>
           </div>
