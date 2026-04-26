@@ -69,14 +69,18 @@ export async function GET(req: Request) {
   }
 
   // Resolve each series' live feed id via env (rolling) or DB snapshot
-  // (ECO/historical). Lower-cased for the inArray match against the audit
-  // table — Pyth Hermes returns ids unprefixed and lower-case; we store
-  // them as-fetched.
+  // (ECO/historical). Pyth Hermes returns ids unprefixed and lower-case
+  // and the cron tick stores them as-fetched, so the env value (which
+  // typically carries the 0x prefix) must be normalized to no-0x lowercase
+  // here AND when matching rows below — otherwise inArray returns 0 rows
+  // and the sparkline stays empty even when ticks are flowing.
+  const normalizeFeedId = (id: string) =>
+    id.toLowerCase().replace(/^0x/, "");
   const feedIdToSeriesId = new Map<string, SeriesId>();
   for (const r of activeRows) {
     if (!ids.includes(r.seriesId)) continue;
     try {
-      feedIdToSeriesId.set(resolveSeriesFeedId(r).toLowerCase(), r.seriesId);
+      feedIdToSeriesId.set(normalizeFeedId(resolveSeriesFeedId(r)), r.seriesId);
     } catch {
       // Skip rows whose feed id cannot resolve — leaves their bucket empty
       // in the response rather than 500ing the entire ticks endpoint.
@@ -106,7 +110,7 @@ export async function GET(req: Request) {
   // (most recent N points — Polymarket-style sparkline shows recent history).
   const fullBySeries: Partial<Record<SeriesId, SeriesTick[]>> = {};
   for (const row of rows) {
-    const seriesId = feedIdToSeriesId.get(row.pythFeedId.toLowerCase());
+    const seriesId = feedIdToSeriesId.get(normalizeFeedId(row.pythFeedId));
     if (!seriesId) continue;
     const arr = fullBySeries[seriesId] ?? (fullBySeries[seriesId] = []);
     arr.push({
