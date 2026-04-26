@@ -16,7 +16,12 @@ import {
   type SeriesStaticConfig,
 } from "@/lib/series-config";
 import { cachedView } from "@/lib/aptos-cache";
-import { fetchPythBatchPrices, lookupTick, pythE8ToCents } from "@/lib/pyth-hermes";
+import {
+  fetchPythBatchPrices,
+  fetchPythBatchPricesResilient,
+  lookupTick,
+  pythE8ToCents,
+} from "@/lib/pyth-hermes";
 import { computeOutcome } from "@/lib/parimutuel";
 import { computeBarrierOutcome } from "@/lib/barrier-resolve";
 import type { SeriesCategory } from "@/lib/types/v3-api";
@@ -126,7 +131,11 @@ export async function GET(request: Request) {
   const allFeedIds = Array.from(feedIdSet);
   let priceMap: Awaited<ReturnType<typeof fetchPythBatchPrices>> = new Map();
   try {
-    priceMap = await fetchPythBatchPrices(allFeedIds);
+    // Hermes-beta drops feeds from `parsed[]` ~20% of the time when batching
+    // mixed crypto + TradFi (CLAUDE.md Pyth 抓取纪律 §3). Resilient wrapper
+    // re-fetches only the missing feeds so price_ticks_v3 / spawn / resolve
+    // all see a complete priceMap from one call site.
+    priceMap = await fetchPythBatchPricesResilient(allFeedIds);
     report.priceRefreshed = priceMap.size;
 
     // Record price_ticks for audit (best-effort)

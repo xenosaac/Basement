@@ -62,6 +62,39 @@ export function lookupTick(
   return map.get(feedId.toLowerCase().replace(/^0x/, ""));
 }
 
+/**
+ * Resilient batch fetch — wraps `fetchPythBatchPrices` with auto-retry on
+ * partial response. Hermes-beta sometimes returns 200 with `parsed[]` short
+ * a few feeds (TradFi feeds XAU/XAG/QQQ/NVDA disproportionately), and the
+ * silent miss historically left `price_ticks_v3` empty for those assets even
+ * while spawn-recurring's separate retry path kept them tradable.
+ *
+ * Strategy: re-fetch only the feeds still missing, up to `maxRetries` extra
+ * attempts. Returns a merged map; persistent misses are warned (not thrown)
+ * so the caller can still use whatever did come back.
+ */
+export async function fetchPythBatchPricesResilient(
+  feedIds: string[],
+  maxRetries = 2,
+): Promise<Map<string, PythPriceTick>> {
+  const merged = new Map<string, PythPriceTick>();
+  let remaining = feedIds.slice();
+  for (let attempt = 0; attempt <= maxRetries && remaining.length > 0; attempt++) {
+    const batch = await fetchPythBatchPrices(remaining);
+    for (const [k, v] of batch) merged.set(k, v);
+    remaining = feedIds.filter(
+      (id) => !merged.has(id.toLowerCase().replace(/^0x/, "")),
+    );
+  }
+  if (remaining.length > 0) {
+    console.warn(
+      `[pyth-hermes] partial response after ${maxRetries + 1} attempts: ` +
+        `${remaining.length} feed(s) still missing — ${remaining.join(", ")}`,
+    );
+  }
+  return merged;
+}
+
 /** Fetch latest Pyth price for N feed IDs in one batch call.
  *  Returns a map keyed by feed_id (lowercase, no 0x). */
 export async function fetchPythBatchPrices(
