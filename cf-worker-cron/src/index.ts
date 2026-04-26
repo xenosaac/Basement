@@ -43,7 +43,8 @@ async function callRoute(
   const start = Date.now();
   try {
     const res = await fetch(`${base}${path}`, {
-      method: "POST",
+      // Cron routes export GET handlers (auth via Bearer header, not body).
+      method: "GET",
       headers: { Authorization: `Bearer ${secret}` },
       // Vercel function default timeout is 60s on Hobby; 30s here gives the
       // Worker headroom to log a clean failure rather than CF terminating.
