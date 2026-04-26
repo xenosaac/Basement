@@ -279,6 +279,57 @@ export function pythUsdCnhFeedId(): string {
   );
 }
 
+/**
+ * Canonical assetSymbol → Pyth feed-id resolver. Single source of truth for
+ * rolling-series feed IDs across cron/tick, /api/series, /api/series/ticks
+ * and any future consumer. Reads `process.env` lazily through the per-symbol
+ * getters above so env updates are picked up on the next request without a
+ * deploy.
+ *
+ * Returns null for symbols that don't have an env mapping (e.g. ECO event
+ * series like US_CPI_MOM whose feed ID is event-snapshotted rather than
+ * symbolic). Callers should fall back to the row's stored `pythFeedId` for
+ * those rows.
+ *
+ * Symbol normalization: case-insensitive (BTC === btc).
+ */
+export function pythFeedIdForSymbol(symbol: string): string | null {
+  switch (symbol.toUpperCase()) {
+    case "BTC":
+      return pythBtcFeedId();
+    case "ETH":
+      return pythEthFeedId();
+    case "SOL":
+      return pythSolFeedId();
+    case "XAU":
+      return pythXauFeedId();
+    case "XAG":
+      return pythXagFeedId();
+    case "XPT":
+      return pythXptFeedId();
+    case "HYPE":
+      return pythHypeFeedId();
+    case "MATIC":
+      return pythMaticFeedId();
+    case "APT":
+      return pythAptFeedId();
+    case "QQQ":
+      return pythQqqFeedId();
+    case "NVDA":
+      return pythNvdaFeedId();
+    case "EURUSD":
+      return pythEurUsdFeedId();
+    case "USDJPY":
+      return pythUsdJpyFeedId();
+    case "USDCNH":
+      return pythUsdCnhFeedId();
+    case "BRENT":
+      return pythBrentFrontMonthFeedId();
+    default:
+      return null;
+  }
+}
+
 /* ---------------------------------------------------------------------------
  * T4-03 — Types
  * ------------------------------------------------------------------------ */
