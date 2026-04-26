@@ -1,0 +1,16 @@
+{
+  "name": "basement-cron",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Worker that triggers Basement Vercel cron routes (Vercel Hobby has no minute-frequency cron).",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240101.0",
+    "typescript": "^5.4.0",
+    "wrangler": "^3.40.0"
+  }
+}
