@@ -40,9 +40,8 @@ import {
   upsertRecurringMarketRowFromChain,
   type DynamicStrikeUpsert,
 } from "@/lib/markets-query";
-import { computeBarrierStrike } from "@/lib/quant/barrier-strike";
 import { isMacroBlackout } from "@/lib/quant/macro-calendar";
-import { computeRealizedVol7d } from "@/lib/quant/vol-estimator";
+import { computeSpawnShadow } from "@/lib/quant/spawn-helpers";
 import { isCloseMoment } from "@/lib/cron-gate";
 
 /**
@@ -128,18 +127,22 @@ function seriesCategoryFor(spec: MarketGroupSpec):
 }
 
 /**
- * Phase D: derive a dynamic-strike spawn payload using vol-estimator +
- * barrier-strike. Async because vol-estimator hits the DB. Returns `null`
- * to signal "skip this round" (e.g. macro blackout). All numbers in USD
- * floats internally; chain-side `strikePriceRaw` is rebuilt from the chosen
- * strike at the end.
+ * Phase D: derive a dynamic-strike spawn payload. Thin cron-side wrapper
+ * around `computeSpawnShadow` (Phase F-2) — the helper owns all quant logic
+ * (vol-estimator + barrier-strike + strikeKind branching). Cron adds the
+ * cron-specific fields the chain submission needs (closeTime, thresholdType,
+ * raw strike at feed expo) and short-circuits on macro blackouts.
+ *
+ * Returns `{ skip: reason }` to cleanly bail on conditions where the next
+ * tick should retry (macro blackout). Throws on anything that signals a
+ * config bug — caller catches in the outer `try` and reports as a skip.
  */
 interface DynamicSpawnDerivation {
   strikePriceRaw: bigint;
   thresholdType: 0 | 1;
   closeTime: number;
   durationSec: number;
-  /** Captured for casesV3 shadow row. */
+  /** Captured for casesV3 shadow row (DynamicStrikeUpsert payload). */
   shadow: {
     strikeKind: string;
     strikePriceE8: bigint;
@@ -163,6 +166,10 @@ async function deriveDynamicSpawnParams(
     );
   }
   const strategy = spec.spawnStrategy;
+  // Defensive expo cross-check: caller (cron `fetchPythPrice`) returns the
+  // feed's runtime expo, registry declares the expected expo. Mismatch =
+  // either feed config drift or registry bug — fail loud, don't silent
+  // fallback (CLAUDE.md).
   if (priceExpo !== strategy.pythExpo) {
     throw new Error(
       `[spawn-recurring] expo mismatch for ${spec.groupId}: feed=${priceExpo} ` +
@@ -170,7 +177,10 @@ async function deriveDynamicSpawnParams(
     );
   }
 
-  // 1. Compute closeTime + tenor from the anchor.
+  // closeTime + tenor for the chain submission side. The shadow helper also
+  // re-derives these internally (it needs tenorSec for σ_tenor); keeping the
+  // derivation here mirrored is intentional so cron has a single concrete
+  // closeTime to pass to `buildCreateMarketTxn` without a second round-trip.
   const closeTime = nextAnchorUtc(strategy.closeAnchor, nowUtcSec);
   const tenorSec = closeTime - nowUtcSec;
   if (tenorSec <= 0) {
@@ -180,84 +190,47 @@ async function deriveDynamicSpawnParams(
     );
   }
 
-  // 2. Macro blackout — skip spawn cleanly so the next cron tick retries.
+  // Macro blackout — skip spawn cleanly so the next cron tick retries.
+  // (The shadow helper itself doesn't do blackout filtering — that's a
+  // cron-side scheduling decision, not a quant one.)
   const blackout = isMacroBlackout(spec.assetSymbol, nowUtcSec);
   if (blackout.blackout) {
     return { skip: `macro blackout: ${blackout.reason ?? "unknown"}` };
   }
 
-  // 3. Vol estimate. Falls back to ASSET_PARAMS default σ when there are <5
-  //    samples — `isFresh=false` flags the audit but doesn't block spawn.
-  const vol = await computeRealizedVol7d(spec.groupId, nowUtcSec);
+  // Delegate strike + barrier + vol audit fields to the shared helper.
+  const shadow = await computeSpawnShadow({
+    groupId: spec.groupId,
+    livePriceRaw: priceRaw,
+    nowUtcSec,
+  });
 
-  // 4. P0 in USD float — used by computeBarrierStrike. priceExpo is negative
-  //    for crypto/commodity (-8), QQQ/forex (-5).
-  const P0Usd = Number(priceRaw) * Math.pow(10, priceExpo);
-  if (!(P0Usd > 0)) {
+  // Translate shadow → chain-submission payload. The chain wants the strike
+  // at feed expo (already what the shadow stores; the field name `e8` is
+  // historical) and a 0/1 thresholdType byte.
+  // - absolute_above:    chain strike = upper barrier
+  // - absolute_below:    chain strike = lower barrier
+  // - barrier_two_sided: chain strike = upper barrier (display parity; v0
+  //                     settles in DB so chain doesn't drive resolution).
+  let strikePriceRaw: bigint;
+  let thresholdType: 0 | 1;
+  if (shadow.strikeKind === "absolute_above") {
+    strikePriceRaw = shadow.barrierHighPriceE8 ?? shadow.strikePriceE8;
+    thresholdType = THRESHOLD_ABOVE as 0;
+  } else if (shadow.strikeKind === "absolute_below") {
+    strikePriceRaw = shadow.barrierLowPriceE8 ?? shadow.strikePriceE8;
+    thresholdType = THRESHOLD_BELOW as 1;
+  } else if (shadow.strikeKind === "barrier_two_sided") {
+    strikePriceRaw = shadow.barrierHighPriceE8 ?? shadow.strikePriceE8;
+    thresholdType = THRESHOLD_ABOVE as 0;
+  } else {
+    // rise_fall under create_market_dynamic_strike is impossible by registry
+    // typing, but guard for defence in depth.
     throw new Error(
-      `[spawn-recurring] non-positive P0Usd ${P0Usd} from priceRaw=${priceRaw} ` +
-        `expo=${priceExpo} for ${spec.groupId}`,
+      `[spawn-recurring] unexpected shadow.strikeKind=${shadow.strikeKind} ` +
+        `for dynamic-strike group ${spec.groupId}`,
     );
   }
-
-  // 5. Branch by strike kind.
-  const expoPower = Math.pow(10, -priceExpo); // priceExpo=-8 → 1e8
-  const e8Power = 1e8;
-
-  if (strategy.strikeKind === "barrier_two_sided") {
-    const up = computeBarrierStrike({
-      asset: spec.assetSymbol,
-      side: "UP",
-      tenorSec,
-      P0: P0Usd,
-      sigmaAnnual: vol.sigmaAnnual,
-      asOfSec: nowUtcSec,
-    });
-    const down = computeBarrierStrike({
-      asset: spec.assetSymbol,
-      side: "DOWN",
-      tenorSec,
-      P0: P0Usd,
-      sigmaAnnual: vol.sigmaAnnual,
-      asOfSec: nowUtcSec,
-    });
-    // chain-side strike_price placeholder = upper barrier (at feed expo).
-    // v0 settles in DB; chain settle is unused for barrier_two_sided.
-    const strikePriceRaw = BigInt(Math.round(up.strikePrice * expoPower));
-    const upperE8 = BigInt(Math.round(up.strikePrice * e8Power));
-    const lowerE8 = BigInt(Math.round(down.strikePrice * e8Power));
-    return {
-      strikePriceRaw,
-      thresholdType: THRESHOLD_ABOVE as 0,
-      closeTime,
-      durationSec: tenorSec,
-      shadow: {
-        strikeKind: "barrier_two_sided",
-        strikePriceE8: upperE8, // chain-display parity; settle uses both barriers
-        barrierLowPriceE8: lowerE8,
-        barrierHighPriceE8: upperE8,
-        volSourceTag: vol.source,
-        volIsFresh: vol.isFresh ? 1 : 0,
-      },
-    };
-  }
-
-  // absolute_above / absolute_below
-  const side = strategy.strikeKind === "absolute_above" ? "UP" : "DOWN";
-  const strike = computeBarrierStrike({
-    asset: spec.assetSymbol,
-    side,
-    tenorSec,
-    P0: P0Usd,
-    sigmaAnnual: vol.sigmaAnnual,
-    asOfSec: nowUtcSec,
-  });
-  const strikePriceRaw = BigInt(Math.round(strike.strikePrice * expoPower));
-  const strikePriceE8 = BigInt(Math.round(strike.strikePrice * e8Power));
-  const thresholdType: 0 | 1 =
-    strategy.strikeKind === "absolute_above"
-      ? (THRESHOLD_ABOVE as 0)
-      : (THRESHOLD_BELOW as 1);
 
   return {
     strikePriceRaw,
@@ -265,12 +238,12 @@ async function deriveDynamicSpawnParams(
     closeTime,
     durationSec: tenorSec,
     shadow: {
-      strikeKind: strategy.strikeKind,
-      strikePriceE8,
-      barrierLowPriceE8: null,
-      barrierHighPriceE8: null,
-      volSourceTag: vol.source,
-      volIsFresh: vol.isFresh ? 1 : 0,
+      strikeKind: shadow.strikeKind,
+      strikePriceE8: shadow.strikePriceE8,
+      barrierLowPriceE8: shadow.barrierLowPriceE8,
+      barrierHighPriceE8: shadow.barrierHighPriceE8,
+      volSourceTag: shadow.volSourceTag,
+      volIsFresh: shadow.volIsFresh ? 1 : 0,
     },
   };
 }

@@ -14,6 +14,10 @@ import { getCachedPrice, pythE8ToCents } from "@/lib/pyth-hermes";
 import { curvePrices } from "@/lib/quant";
 import { cachedView } from "@/lib/aptos-cache";
 import { MARKET_GROUPS } from "@/lib/market-groups";
+import {
+  computeSpawnShadow,
+  type SpawnShadow,
+} from "@/lib/quant/spawn-helpers";
 import type {
   SeriesCategory,
   SeriesListResponse,
@@ -107,24 +111,71 @@ export async function GET() {
         ? pythE8ToCents(livePrice.priceE8, livePrice.expo).toString()
         : null;
 
-      // Lazy-spawn current round when market is open. Mirrors cron's spawn block
-      // so dev environments without a tick scheduler still get round rows.
-      // Closed-hours series (e.g. QQQ weekend) intentionally skip this.
-      if (marketHours.open) {
-        await db
-          .insert(casesV3)
-          .values({
-            seriesId: s.seriesId,
-            roundIdx: currentRoundIdx,
-            startTimeSec,
-            closeTimeSec,
-            strikePriceE8: livePrice?.priceE8 ?? null,
-            strikeCents: livePrice
-              ? pythE8ToCents(livePrice.priceE8, livePrice.expo)
-              : null,
-            state: "OPEN",
-          })
-          .onConflictDoNothing();
+      // Lazy-spawn current round when market is open. Mirrors cron's spawn
+      // block so dev environments without a tick scheduler still get round
+      // rows. Closed-hours series (e.g. QQQ weekend) intentionally skip this.
+      //
+      // Phase F-2 fix: previously this path wrote ONLY strikePriceE8 + skipped
+      // strikeKindCaptured / barrier_*_price_e8 / vol_source_tag, leaving new
+      // dynamic-strike rounds with NULL captures → front-end fell back to
+      // rise_fall copy on absolute_above series. We now route through
+      // `computeSpawnShadow` so cron + lazy-spawn produce identical shadows.
+      //
+      // CLAUDE.md silent-fallback discipline: if the shadow can't be computed
+      // (Pyth livePrice null, vol-estimator failure, unknown groupId) we
+      // SKIP the lazy insert entirely. The cron will retry on its next tick;
+      // the front-end already handles "strike pending" via Slot D's
+      // "a dynamic level" copy. Writing a NULL strikeKindCaptured row would
+      // re-introduce the bug we're fixing.
+      if (marketHours.open && livePrice) {
+        let shadow: SpawnShadow | null = null;
+        try {
+          if (groupId) {
+            shadow = await computeSpawnShadow({
+              groupId,
+              livePriceRaw: livePrice.priceE8,
+              nowUtcSec: nowSec,
+            });
+          } else {
+            // Legacy series with no registry mapping (BTC/ETH 3m). Treat as
+            // rise_fall directly — strike == open price, no barrier columns.
+            shadow = {
+              strikeKind: "rise_fall",
+              strikePriceE8: livePrice.priceE8,
+              barrierLowPriceE8: null,
+              barrierHighPriceE8: null,
+              volSourceTag: "rise_fall",
+              volIsFresh: false,
+            };
+          }
+        } catch (err) {
+          console.error(
+            `[/api/series] computeSpawnShadow failed for seriesId=${s.seriesId} ` +
+              `groupId=${groupId ?? "(none)"}; skip-spawn (cron will retry)`,
+            err,
+          );
+          shadow = null;
+        }
+
+        if (shadow) {
+          await db
+            .insert(casesV3)
+            .values({
+              seriesId: s.seriesId,
+              roundIdx: currentRoundIdx,
+              startTimeSec,
+              closeTimeSec,
+              strikePriceE8: shadow.strikePriceE8,
+              strikeCents: pythE8ToCents(livePrice.priceE8, livePrice.expo),
+              strikeKindCaptured: shadow.strikeKind,
+              barrierLowPriceE8: shadow.barrierLowPriceE8,
+              barrierHighPriceE8: shadow.barrierHighPriceE8,
+              volSourceTag: shadow.volSourceTag,
+              volIsFresh: shadow.volIsFresh ? 1 : 0,
+              state: "OPEN",
+            })
+            .onConflictDoNothing();
+        }
       }
 
       const [caseRow] = await db
