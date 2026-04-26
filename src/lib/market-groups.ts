@@ -19,6 +19,7 @@ import {
   pythEurUsdFeedId,
   pythHypeFeedId,
   pythMaticFeedId,
+  pythNvdaFeedId,
   pythQqqFeedId,
   pythSolFeedId,
   pythUsdCnhFeedId,
@@ -365,7 +366,8 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
       maxTradeBps: 500,
     },
     questionTemplate: "Will Solana break below {strike} in the next 15 minutes?",
-    active: true,
+    legacyCleanupOnly: true,
+    active: false,
   },
   "sol-15m-barrier": {
     groupId: "sol-15m-barrier",
@@ -394,7 +396,8 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     },
     questionTemplate:
       "Will Solana break out of the barrier range in the next 15 minutes?",
-    active: true,
+    legacyCleanupOnly: true,
+    active: false,
   },
 
   "hype-1h-up": {
@@ -423,7 +426,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
       maxTradeBps: 500,
     },
     questionTemplate: "Will Hyperliquid break above {strike} in the next 1 hour?",
-    active: false,
+    active: true,
   },
   "hype-1h-down": {
     groupId: "hype-1h-down",
@@ -596,7 +599,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
       maxTradeBps: 500,
     },
     questionTemplate: "Will Gold break above {strike} in the next 1 hour?",
-    active: false,
+    active: true,
   },
   "xau-1h-down": {
     groupId: "xau-1h-down",
@@ -653,7 +656,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
       maxTradeBps: 500,
     },
     questionTemplate: "Will Silver break above {strike} in the next 1 hour?",
-    active: false,
+    active: true,
   },
   "xag-1h-down": {
     groupId: "xag-1h-down",
@@ -829,6 +832,7 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     },
     questionTemplate:
       "Will QQQ break above {strike} by NY 4:00 PM ET close?",
+    // 2026-04-25: user wants QQQ tracked as breakdown only; up direction off
     active: false,
   },
   "qqq-1d-down": {
@@ -858,7 +862,36 @@ export const MARKET_GROUPS: Record<string, MarketGroupSpec> = {
     },
     questionTemplate:
       "Will QQQ break below {strike} by NY 4:00 PM ET close?",
-    active: false,
+    active: true,
+  },
+  "nvda-1d-down": {
+    groupId: "nvda-1d-down",
+    assetSymbol: "NVDA",
+    category: "stocks",
+    sortName: "NVDA ↓",
+    resolutionKind: "pyth",
+    pythFeedId: "",
+    durationSec: 24 * 60 * 60,
+    tickSize: 1n,
+    priceExpo: -5,
+    displayTickRaw: 1n,
+    poolDepth: 500_000_000n,
+    spawnCadence: "on-resolve",
+    spawnStrategy: {
+      kind: "create_market_dynamic_strike",
+      closeAnchor: "daily-ny-4pm",
+      strikeKind: "absolute_below",
+      volSource: "rolling-7d-realized",
+      marketHours: "rth-only",
+      pythExpo: -5,
+      marketType: MARKET_TYPE_DAILY_STRIKE,
+      maxStalenessSec: 600,
+      feeBps: 200,
+      maxTradeBps: 500,
+    },
+    questionTemplate:
+      "Will NVDA break below {strike} by NY 4:00 PM ET close?",
+    active: true,
   },
 
   // --- Others / Forex (24x5, weekend skip) -------------------------------
@@ -1142,6 +1175,8 @@ export function pythFeedForGroup(spec: MarketGroupSpec): string {
       return resolveBrentFeedId(Math.floor(Date.now() / 1000));
     case "QQQ":
       return pythQqqFeedId();
+    case "NVDA":
+      return pythNvdaFeedId();
     case "EURUSD":
       return pythEurUsdFeedId();
     case "USDJPY":
