@@ -8,11 +8,13 @@ Markets price binary outcomes on Paradigm's pm-AMM curve. Trades settle in Virtu
 
 ## Markets
 
+Recurring breakout/breakdown markets dynamically pick a strike at round-open such that YES has ~30% historical probability (vol-derived; see `src/lib/quant/barrier-strike.ts`).
+
 | Tab | Assets | Cadence |
 |---|---|---|
 | Crypto | BTC, ETH, SOL, HYPE, MATIC, APT | rolling 3-min / 15-min / hourly |
 | Commodity | XAU, XAG, XPT, Brent | hourly / daily |
-| Stocks | NASDAQ100 (QQQ ETF proxy, NYSE RTH) | daily |
+| Stocks | NASDAQ100 (QQQ ETF) + NVIDIA (NVDA), NYSE RTH only | daily |
 | Others | EUR/USD, USD/JPY, USD/CNH | hourly (FX 24/5) |
 | Macro | CPI, Core PCE, Unemployment, GDP | per scheduled release |
 
