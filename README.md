@@ -4,6 +4,8 @@
 
 Markets price binary outcomes on Paradigm's pm-AMM curve. Trades settle in VirtualUSD against on-chain Pyth feeds; positions can be sold back to the curve at any point before resolve. The market catalog is registry-driven — assets, cadences, and strike kinds all live in `src/lib/market-groups.ts`.
 
+**Live**: [basement.xiangliu.net](https://basement.xiangliu.net) (Aptos testnet)
+
 ---
 
 ## Markets

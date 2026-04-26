@@ -83,3 +83,13 @@ next-env.d.ts
 # Move build artifacts
 move/basement/build/
 .aptos/
+
+# Demo recordings + Adobe Premiere project files (multi-hundred MB, never commit)
+Demo_Vid/
+*.mov
+*.mp4
+*.webm
+*.mkv
+*.m4v
+*.prproj
+*.prin
