@@ -1,5 +1,7 @@
 /**
- * Seed series_v3 table. One-time (idempotent via onConflictDoNothing).
+ * Seed series_v3 table. Idempotent + retiring — re-running the seed safely
+ * flips RETIRED_LEGACY_SERIES_IDS to is_active=0 in addition to upserting
+ * active rows.
  * Run with: `npx tsx scripts/seed-series-v3.ts`
  *
  * Two layers:
@@ -12,6 +14,7 @@
  *      `ensureSeriesV3RowForGroup` to lazy-create on the first spawn.
  */
 import "dotenv/config";
+import { sql } from "drizzle-orm";
 import { db } from "../src/db";
 import { seriesV3 } from "../src/db/schema";
 import {
@@ -20,6 +23,15 @@ import {
   resolveSeriesFeedId,
 } from "../src/lib/series-config";
 import { pythFeedIdForSymbol } from "../src/lib/aptos";
+
+/** Series ids that have been superseded by dynamic-strike groups in market-groups.ts.
+ *  Re-seed flips them to is_active=0 instead of leaving them as zombie active rows. */
+const RETIRED_LEGACY_SERIES_IDS: ReadonlySet<string> = new Set([
+  "qqq-usdc-1d",   // superseded by qqq-1d-down (absolute_below, daily-ny-4pm)
+  "xau-usdc-1h",   // superseded by xau-1h-up (absolute_above, next-1h)
+  "xag-usdc-1h",   // superseded by xag-1h-up
+  "hype-usdc-1h",  // superseded by hype-1h-up
+]);
 
 /** v0.5 dynamic-strike series seed. seriesId == groupId by convention.
  *  Active flag here mirrors `MARKET_GROUPS[].active` — the registry stays
@@ -139,7 +151,7 @@ async function main() {
   // The historical qqq-usdc-1d row is folded in as inactive: QQQ moved to the
   // dynamic-strike `qqq-1d-down` seriesId (see DYNAMIC_STRIKE_SEEDS below).
   const legacyRows = SERIES_CONFIG.map((s) => {
-    const isRetiredQqq = s.seriesId === "qqq-usdc-1d";
+    const isRetired = RETIRED_LEGACY_SERIES_IDS.has(s.seriesId);
     return {
       seriesId: s.seriesId,
       assetSymbol: s.assetSymbol,
@@ -151,7 +163,7 @@ async function main() {
       marketHoursGated: s.marketHoursGated ? 1 : 0,
       feeBps: s.feeBps,
       sortOrder: s.sortOrder,
-      isActive: isRetiredQqq ? 0 : 1,
+      isActive: isRetired ? 0 : 1,
     };
   });
 
@@ -177,10 +189,15 @@ async function main() {
   const inserted = await db
     .insert(seriesV3)
     .values(allRows)
-    .onConflictDoNothing()
+    .onConflictDoUpdate({
+      target: seriesV3.seriesId,
+      set: {
+        isActive: sql<number>`excluded.is_active`,
+      },
+    })
     .returning({ seriesId: seriesV3.seriesId });
   console.log(
-    `Seeded ${inserted.length} series (${allRows.length - inserted.length} already existed).`,
+    `Upserted ${inserted.length} series rows (active flag refreshed for existing).`,
   );
   for (const s of SERIES_CONFIG) {
     console.log(`  ${s.seriesId}  ${s.pair}  ${s.cadenceSec}s  ${s.category}`);
