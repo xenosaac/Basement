@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-    "node": ">=25.9.0"
+    "node": "24.x"
   },
   "scripts": {
     "dev": "NEXT_DIST_DIR=.next-dev next dev --webpack",
