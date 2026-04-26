@@ -22,10 +22,8 @@ export type SeriesId = string;
 export type LegacySeriesId =
   | "btc-usdc-3m"
   | "eth-usdc-3m"
-  | "sol-usdc-3m"
   | "xau-usdc-1h"
   | "xag-usdc-1h"
-  | "us500-usdc-1h"
   | "hype-usdc-1h";
 
 export type SeriesCategory =
@@ -36,12 +34,12 @@ export type SeriesCategory =
 
 export interface SeriesStatic {
   seriesId: SeriesId;
-  assetSymbol: string; // "BTC", "ETH", "SOL", "XAU", "XAG", "US500", "HYPE"
+  assetSymbol: string; // "BTC", "ETH", "SOL", "XAU", "XAG", "HYPE"
   pair: string; // e.g. "BTC/USDC"
   category: SeriesCategory;
   cadenceSec: number; // 180 or 3600
   pythFeedId: string; // hex, no 0x prefix (feeds listed in series-config.ts)
-  marketHoursGated: boolean; // true for US500
+  marketHoursGated: boolean; // true for RTH-restricted series (e.g. QQQ)
   sortOrder: number; // UI display order within category
 }
 
@@ -63,6 +61,23 @@ export interface SeriesSummary extends SeriesStatic {
     open: boolean;
     reason?: "weekend" | "holiday" | "pre-open" | "post-close";
   };
+  /** v0.5 barrier-rollout — strike semantics for this series.
+   *  - "rise_fall": legacy directional rounds (BTC/ETH 3m). Question is
+   *    "Will X rise in the next N?" — strikePriceE8 == open price.
+   *  - "absolute_above": YES if close > strikePriceE8 (HYPE/XAU/XAG 1h).
+   *  - "absolute_below": YES if close < strikePriceE8 (QQQ/NVDA 1d).
+   *  Defaults to "rise_fall" when seriesV3.strike_kind is NULL. */
+  strikeKind: "rise_fall" | "absolute_above" | "absolute_below";
+  /** Latest OPEN round's strike level as Pyth-native price_e8 (stringified
+   *  bigint to dodge JS number precision). Null if no OPEN round yet, or
+   *  the round hasn't captured a strike (e.g. pre-spawn dynamic-strike).
+   *  For absolute_above this is barrierHighPriceE8; for absolute_below this
+   *  is barrierLowPriceE8; for rise_fall this is strikePriceE8 (open). */
+  strikePriceE8: string | null;
+  /** Pyth feed exponent (always negative — e.g. -8 for crypto/spot, -5 for
+   *  US equities, -3 for legacy XAU). Lets the UI render strikePriceE8 in
+   *  human units without having to look it up by groupId. */
+  priceExpo: number;
 }
 
 export interface SeriesListResponse {
@@ -230,6 +245,11 @@ export interface QuoteResponse {
     upPriceCentsAfter: number;
     downPriceCentsAfter: number;
   } | null;
+  /** Round state at quote time. UI uses this to choose between trading
+   *  controls and post-resolve display. Absent for pre-spawn quotes. */
+  caseState?: CaseState;
+  /** Resolved outcome (UP/DOWN/INVALID) when caseState === "RESOLVED". */
+  resolvedOutcome?: Outcome | null;
 }
 
 export interface PositionRow {
@@ -250,6 +270,10 @@ export interface PositionRow {
   status: "OPEN" | "CLAIMABLE" | "CLAIMED" | "LOST";
   /** What user receives if they SELL all remaining shares now. Equal to markValueCents for CLAIMABLE. Field name is historical. */
   claimableCents: string | null;
+  /** Round state at the time of the response. Lets the UI distinguish OPEN vs RESOLVED vs VOID rows without a separate fetch. */
+  caseState: CaseState;
+  /** Resolved outcome (UP/DOWN/INVALID) when caseState === "RESOLVED"; null otherwise. */
+  resolvedOutcome: Outcome | null;
 }
 
 export interface PositionsResponse {
