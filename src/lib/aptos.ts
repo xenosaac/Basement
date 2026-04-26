@@ -247,6 +247,16 @@ export function pythQqqFeedId(): string {
     process.env.NEXT_PUBLIC_PYTH_QQQ_FEED_ID,
   );
 }
+// NVDA/USD — Equity.US.NVDA/USD RTH variant on hermes-beta. Mirrors the QQQ
+// wiring (RTH-only feed, no ON/PRE/POST suffix). Beta channel feed id:
+// 0x16e38262485de554be6a09b0c1d4d86eb2151a7af265f867d769dee359cec32e.
+export function pythNvdaFeedId(): string {
+  return pickStatic(
+    "PYTH_NVDA_FEED_ID (or NEXT_PUBLIC_PYTH_NVDA_FEED_ID)",
+    process.env.PYTH_NVDA_FEED_ID,
+    process.env.NEXT_PUBLIC_PYTH_NVDA_FEED_ID,
+  );
+}
 export function pythEurUsdFeedId(): string {
   return pickStatic(
     "PYTH_EURUSD_FEED_ID (or NEXT_PUBLIC_PYTH_EURUSD_FEED_ID)",
